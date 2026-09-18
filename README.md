@@ -52,10 +52,15 @@ Stdlib-only Python CLI, in the `file_integrity_checker/` directory of `my_projec
 
 ## Certifications
 
-Eleven. Badges on [Credly](https://www.credly.com/users/aryan_v).
+Seven with verifiable badges on [Credly](https://www.credly.com/users/aryan_v):
 
-- **Cisco Networking Academy** (2026) — Junior Cybersecurity Analyst career path · Introduction to Cybersecurity · Networking Basics · Getting Started with Cisco Packet Tracer
-- **IBM SkillsBuild** (2026) — Data Fundamentals · Getting Started with Data · Generative AI Essentials: Using LLMs to Work with Data · Make Agentic AI Work for You · Lab: Troubleshoot Your Code Using IBM Bob
+- **Cisco Networking Academy** (2026) — Junior Cybersecurity Analyst career path · Introduction to Cybersecurity · Networking Basics
+- **IBM SkillsBuild** (2026) — Data Fundamentals · Getting Started with Data · Generative AI Essentials: Using LLMs to Work with Data · Make Agentic AI Work for You
+
+Four more issued as certificates rather than badges, copies on my [portfolio](https://bu1ldr.github.io/Portfolio/):
+
+- **Cisco Networking Academy** (2026) — Getting Started with Cisco Packet Tracer
+- **IBM SkillsBuild** (2026) — Lab: Troubleshoot Your Code Using IBM Bob
 - **AWS** (2026) — Foundations of Prompt Engineering
 - **E&ICT Academy, IIT Kanpur** (2025) — Fundamentals of C Programming
 
