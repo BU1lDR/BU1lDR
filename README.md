@@ -16,7 +16,7 @@ MIT. Dependency CVEs resolved against OSV.dev, SAST rules for dangerous sinks an
 
 - Every outbound request passes one authorization gate holding two separate allowlists: **Scope** (hosts you are permitted to test) and **Egress** (the tool's own data sources, such as OSV).
 - The one raw-socket probe that bypasses HTTP — the TLS certificate check — takes that gate as a *positional* argument, so omitting it is a `TypeError` rather than a silently ungated request. `--active` without `--i-am-authorized` degrades to a passive scan instead of firing.
-- 355 tests, none of which touch the network. Matched secrets are redacted before they reach a report or a log (`AKIA****************`), and SCA findings carry per-advisory fix boundaries (`Bump flask from 0.12 to 0.12.3`). Exit codes `0/1/2`, so a calling script can act on the result.
+- The whole test suite runs offline — not one test touches the network. Matched secrets are redacted before they reach a report or a log (`AKIA****************`), and SCA findings carry per-advisory fix boundaries (`Bump flask from 0.12 to 0.12.3`). Exit codes `0/1/2`, so a calling script can act on the result.
 
 ### [Retail customer segmentation](https://github.com/BU1lDR/retail-customer-segmentation) — 1,067,371 transaction lines
 
