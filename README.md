@@ -23,7 +23,7 @@ MIT. Dependency CVEs resolved against OSV.dev, SAST rules for dangerous sinks an
 IBM SkillsBuild × BharatCares capstone. Jupyter, pandas, scikit-learn. UCI Online Retail II (CC BY 4.0), deliberately not committed.
 
 - 1,067,371 raw lines cleaned through nine individually logged steps down to £20.5M of usable revenue, then RFM segmentation cross-checked against K-Means, CLV estimation and a cohort retention matrix.
-- Names the 683 high-value accounts worth £1,689,620 that have stopped ordering. The top 20% of customers hold 77.2% of revenue.
+- Names the 683 high-value accounts worth £1,689,620 that have stopped ordering. The top 20% of identified customers hold 77.2% of identified revenue.
 - Shows its own 12-month CLV projection running 2.91× high on a like-for-like basis, instead of quoting that projection as a result, and states what the data cannot support: 22.9% of lines carry no customer ID.
 
 ### [Portfolio](https://github.com/BU1lDR/Portfolio) — hand-written site, zero runtime dependencies ([live](https://bu1ldr.github.io/Portfolio/))
