@@ -1,0 +1,6 @@
+# The builder writes README.md with LF and refuses to touch a CRLF copy, so the
+# checkout must not hand it one. Pinned here rather than left to core.autocrlf.
+*.md   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf

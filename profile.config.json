@@ -1,0 +1,13 @@
+{
+  "login": "BU1lDR",
+  "exclude": [],
+  "order": [
+    "security-scanner",
+    "file-integrity-checker",
+    "retail-customer-segmentation",
+    "Portfolio"
+  ],
+  "profile_path": ".github/PROFILE.md",
+  "snippets_dir": "snippets",
+  "markers": ["<!-- work:start -->", "<!-- work:end -->"]
+}

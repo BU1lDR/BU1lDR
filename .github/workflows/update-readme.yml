@@ -1,0 +1,135 @@
+# Rebuilds the Work section of README.md from the repositories it describes, and
+# commits the result when -- and only when -- it changed.
+#
+# Four ways in. Every hour, because a repository can gain a release, a description
+# or a PROFILE.md edit with nothing here to notice. By hand, from the Actions tab.
+# On a repository_dispatch of type "project-updated", which a project repository
+# can send from its own workflow the moment it pushes (see docs/notify-profile.yml;
+# it needs a token the project repository's own GITHUB_TOKEN cannot supply, so it
+# is opt-in). And on a push to main that touches the builder, its tests, its
+# config, a snippet, the README, or this file, so a change here is applied at once.
+#
+# The bot's own commit does not start another run: pushes made with GITHUB_TOKEN do
+# not trigger workflows, and a second run would find nothing to change anyway. A
+# human edit inside the markers is overwritten on the next run -- that is the
+# contract, and the generated block says so in its first line.
+#
+# The unit tests run first, on the same interpreter, so a builder that has stopped
+# doing what its docstring says cannot rewrite the README with confidence.
+#
+# The builder exits 2 and leaves README.md alone on anything other than a clean
+# answer from the API, so an outage or a rate limit turns this run red rather than
+# committing a Work section with a repository quietly missing from it. GitHub emails
+# a red scheduled run to whoever last edited the cron line below; nothing is retried
+# until the next hour. Warnings the builder raises (a repository rendered from its
+# bare description, a curated name that no longer matches) appear as annotations
+# and in the run's summary, not in email -- open the run when a project changes.
+#
+# GitHub disables the schedule in a public repository after 60 days without
+# "repository activity", which it does not define, and does not say so anywhere a
+# person would look. The last step makes an empty commit when nothing has been
+# committed for 50 days, on green runs and red ones alike -- a builder that is red
+# for two months is exactly when the schedule and its emails must stay alive.
+
+name: Update README
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [project-updated]
+  push:
+    branches: [main]
+    paths:
+      - 'tools/**'
+      - 'tests/**'
+      - 'snippets/**'
+      - 'profile.config.json'
+      - 'README.md'
+      - '.github/workflows/update-readme.yml'
+
+# The repository default is read; this job has to write README.md back.
+permissions:
+  contents: write
+
+# Two triggers close together (the hourly tick and a dispatch) must not push over
+# each other. At most one run waits; a third trigger replaces the waiting one. The
+# running one is never cancelled, since it may be mid-push. The waiting run checks
+# out main as of when it starts (see `ref` below), so it sees the earlier commit.
+concurrency:
+  group: update-readme
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: rebuild the Work section
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The branch, not the event's SHA: a run that queued behind another would
+          # otherwise rebuild on the commit before that run's push and be rejected.
+          ref: main
+
+      - name: The builder still does what its docstring says
+        run: python3 -m unittest discover -s tests -t .
+
+      - name: Rebuild from the repositories
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/build_readme.py --summary-file "$RUNNER_TEMP/summary.md"
+
+      - name: Commit if anything changed
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          for attempt in 1 2 3; do
+            if git diff --quiet -- README.md; then
+              echo "README.md already matches the repositories."
+              exit 0
+            fi
+            git add README.md
+            git commit -F "$RUNNER_TEMP/summary.md"
+            before=$(git rev-parse origin/main)
+            if git push; then
+              exit 0
+            fi
+            git fetch origin main
+            if [ "$(git rev-parse origin/main)" = "$before" ]; then
+              echo "::error::push rejected but main did not move -- a branch rule or a token permission, not a race"
+              exit 1
+            fi
+            [ "$attempt" -lt 3 ] || break
+            # Someone pushed to main while this ran. Do not rebase a generated file:
+            # start again from their commit and let the builder decide what changed.
+            echo "push rejected; rebuilding on the new head (attempt $((attempt + 1)) of 3)"
+            git reset --hard origin/main
+            python3 tools/build_readme.py --summary-file "$RUNNER_TEMP/summary.md"
+          done
+          echo "::error::gave up after three rejected pushes" >&2
+          exit 1
+
+      - name: Keep the schedule alive
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+          last=$(git log -1 --format=%ct)
+          cutoff=$(date -d '50 days ago' +%s)
+          if [ "$last" -ge "$cutoff" ]; then
+            echo "Last commit is recent enough; no keepalive needed."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --allow-empty \
+            -m "Keep the hourly README check alive" \
+            -m "GitHub disables scheduled workflows in a public repository after 60 days without a commit. Nothing in the README changed; this commit exists so the schedule that checks it keeps running."
+          git push || echo "::warning::keepalive push rejected (main moved); the next hourly run will retry"
