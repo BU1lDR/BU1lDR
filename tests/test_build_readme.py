@@ -318,6 +318,16 @@ class HostileInput(Harness):
         self.assertEqual(code, 0)
         self.assertIn("write {live} for a literal\n", readme)
 
+    def test_long_blurb_warns_but_renders(self):
+        self.config({"login": LOGIN, "order": [], "markers": [START, END], "max_blurb_chars": 60})
+        self.repos(repo("first"))
+        self.profile("first", "# first — t\n\n" + "words " * 30 + "\n")
+        code, out, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("characters against a limit of 60", out)
+        self.assertIn("words words", readme)
+        self.assertIn("Warnings:\n  first: .github/PROFILE.md is", self.summary())
+
     def test_live_pointing_at_github_is_a_warning_not_an_error(self):
         self.repos(repo("first", homepage="https://github.com/someone/first"))
         self.profile("first", "# first — t ([live]({live}))\n\nbody\n")

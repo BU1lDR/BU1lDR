@@ -54,6 +54,15 @@ Each generated section opens with an invisible "<!-- repo: <name> -->" line, whi
 how the block is split back into sections on the next run without guessing from
 headings. A body may not contain that text; a body may link to a sibling repository.
 
+BREVITY
+
+The profile is a summary, not a second README. docs/PROFILE.template.md is the
+shape: a tagline, a one-line meta row, at most two short paragraphs. Detail belongs
+in the repository's own README, where its CI can hold it to the code. The config's
+"max_blurb_chars" is the soft ceiling: a longer blurb still renders, with a warning
+on the run and in its summary, because length is a judgement and the profile must not
+stop updating over one.
+
 ORDER AND SCOPE
 
 profile.config.json names the account, the repositories to leave out, and the order of
@@ -595,6 +604,10 @@ def build(root: Path, source, check: bool, summary_file: Path | None, out=sys.st
                                  f"{snippets.name}/{name}.md; restore one rather than let its section collapse")
             warn(f"{name}: rendered from the GitHub description ({profile_path} not found or empty)")
         where = f"{full_name}/{origin}"
+        limit = int(config.get("max_blurb_chars", 0) or 0)
+        if blurb and limit and len(blurb) > limit:
+            warn(f"{name}: {origin} is {len(blurb):,} characters against a limit of {limit:,}; "
+                 "the profile is meant to stay brief -- move the detail into that repository's README")
         if blurb and uses_placeholder(blurb, "live"):
             host = urllib.parse.urlsplit((repo.get("homepage") or "").strip()).hostname or ""
             if host in ("github.com", "www.github.com"):

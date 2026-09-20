@@ -8,6 +8,7 @@
     "Portfolio"
   ],
   "profile_path": ".github/PROFILE.md",
+  "max_blurb_chars": 1400,
   "snippets_dir": "snippets",
   "markers": ["<!-- work:start -->", "<!-- work:end -->"]
 }
