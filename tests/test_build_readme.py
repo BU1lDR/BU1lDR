@@ -9,6 +9,7 @@ not only on the fixture double.
 
 from __future__ import annotations
 
+import contextlib
 import email.message
 import io
 import json
@@ -481,10 +482,17 @@ class Lifecycle(Harness):
         self.assertIn("Sources:\n  first: .github/PROFILE.md", text)
 
     def test_main_maps_errors_to_exit_2(self):
+        # main() reports on stderr; keep that out of the test log, where an "error:"
+        # line from a passing test reads like a failing one.
+        argv = ["--root", str(self.root), "--fixtures", str(self.fixtures)]
         self.repos(repo("a-fork", fork=True))
-        self.assertEqual(br.main(["--root", str(self.root), "--fixtures", str(self.fixtures)]), br.EXIT_ERROR)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(br.main(argv), br.EXIT_ERROR)
+        self.assertIn("no public repositories", err.getvalue())
         (self.fixtures / "repos.json").unlink()  # an unforeseen exception, not a BuildError
-        self.assertEqual(br.main(["--root", str(self.root), "--fixtures", str(self.fixtures)]), br.EXIT_ERROR)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(br.main(argv), br.EXIT_ERROR)
+        self.assertIn("unexpected", err.getvalue())
 
 
 class FakeResponse:
