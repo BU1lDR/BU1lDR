@@ -1,0 +1,89 @@
+# Weekly audit of the README automation: is the hourly workflow alive, did it run
+# lately, is the README the shape the builder writes, do its links answer, are the
+# actions pinned, is the dispatch hook in the project repositories still delivering.
+# scripts/audit.sh has the checks; this only runs it and routes a failure to an
+# issue. Run it by hand from the Actions tab after changing anything here.
+
+name: Audit README automation
+
+on:
+  schedule:
+    # Mondays 06:41 UTC = 12:11 IST (no daylight saving in India). Quoted: a bare
+    # leading * is a YAML alias.
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read   # workflow state and run history
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  audit:
+    name: audit the automation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false   # nothing here pushes
+
+      - name: Run the audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/audit.sh
+
+  report:
+    name: open or update the failure issue
+    needs: audit
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="README automation audit is failing"
+          body="Run: $RUN_URL
+
+          One or more FAIL lines in scripts/audit.sh. Open the run for the list.
+
+          This issue is updated by every failed audit and closed by the next passing one."
+          number=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+                     --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n1)
+          if [ -n "$number" ]; then
+            gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
+
+  recovered:
+    name: close the failure issue
+    needs: audit
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="README automation audit is failing"
+          gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+            --json number,title --jq ".[] | select(.title == \"$title\") | .number" \
+          | while read -r number; do
+              [ -n "$number" ] || continue
+              gh issue close "$number" -R "$GITHUB_REPOSITORY" --comment "Recovered: $RUN_URL passed."
+            done
