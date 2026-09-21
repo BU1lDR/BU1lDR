@@ -1,0 +1,160 @@
+[
+  {
+    "id": 101,
+    "name": "curated",
+    "full_name": "hostile-owner/curated",
+    "html_url": "https://github.com/hostile-owner/curated",
+    "fork": false,
+    "archived": false,
+    "private": false,
+    "description": "Title $& $' $` $1 \\1 | un`balanced <script>alert(1)</script> <img src=x onerror=1> <a href=\"https://evil.example\">x</a> <details><summary>s</summary></details> <picture></picture> [x](y) *stars* _under_ snake_case_name :shortcode: &amp; مرحبا بالعالم 👨‍👩‍👧‍👦 café\r\n# not a heading <!-- work:end --> <!-- work:start --> <!-- repo: ghost --> <!-- build: sections=0 digest=000000000000 --> xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "homepage": "https://example.com/live?a=1&b=2",
+    "pushed_at": "2026-06-01T00:00:00Z",
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "public"
+  },
+  {
+    "id": 102,
+    "name": "fallback",
+    "full_name": "hostile-owner/fallback",
+    "html_url": "https://github.com/hostile-owner/fallback",
+    "fork": false,
+    "archived": false,
+    "private": false,
+    "description": "# Heading\n- item | `tick` <b>x</b> \\1 $1",
+    "homepage": null,
+    "pushed_at": "2026-05-01T00:00:00Z",
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "public"
+  },
+  {
+    "id": 103,
+    "name": "empty-desc",
+    "full_name": "hostile-owner/empty-desc",
+    "html_url": "https://github.com/hostile-owner/empty-desc",
+    "fork": false,
+    "archived": false,
+    "private": false,
+    "description": null,
+    "homepage": null,
+    "pushed_at": "2026-05-01T00:00:00Z",
+    "license": null,
+    "visibility": "public"
+  },
+  {
+    "id": 104,
+    "name": "Zulu-Upper",
+    "full_name": "hostile-owner/Zulu-Upper",
+    "html_url": "https://github.com/hostile-owner/Zulu-Upper",
+    "fork": false,
+    "archived": false,
+    "private": false,
+    "description": "An upper-case name sorts by its lower-case form. ~~strike~~ #1 ---",
+    "homepage": null,
+    "pushed_at": "2026-05-01T00:00:00Z",
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "public"
+  },
+  {
+    "id": 105,
+    "name": "secret-project",
+    "full_name": "hostile-owner/secret-project",
+    "html_url": "https://github.com/hostile-owner/secret-project",
+    "fork": false,
+    "archived": false,
+    "private": true,
+    "description": "TOP SECRET DESCRIPTION 7f3a",
+    "homepage": null,
+    "pushed_at": "2026-05-01T00:00:00Z",
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "private"
+  },
+  {
+    "id": 106,
+    "name": "internal-tool",
+    "full_name": "hostile-owner/internal-tool",
+    "html_url": "https://github.com/hostile-owner/internal-tool",
+    "fork": false,
+    "archived": false,
+    "private": false,
+    "description": "INTERNAL ONLY DESCRIPTION 9c2e",
+    "homepage": null,
+    "pushed_at": "2026-05-01T00:00:00Z",
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "internal"
+  },
+  {
+    "id": 107,
+    "name": "forked-thing",
+    "full_name": "hostile-owner/forked-thing",
+    "html_url": "https://github.com/hostile-owner/forked-thing",
+    "fork": true,
+    "archived": false,
+    "private": false,
+    "description": "FORK DESCRIPTION 5d1b",
+    "homepage": null,
+    "pushed_at": "2026-05-01T00:00:00Z",
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "public"
+  },
+  {
+    "id": 108,
+    "name": "old-archive",
+    "full_name": "hostile-owner/old-archive",
+    "html_url": "https://github.com/hostile-owner/old-archive",
+    "fork": false,
+    "archived": true,
+    "private": false,
+    "description": "ARCHIVED DESCRIPTION 3e8a",
+    "homepage": null,
+    "pushed_at": "2026-05-01T00:00:00Z",
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "public"
+  },
+  {
+    "id": 109,
+    "name": "hostile-owner",
+    "full_name": "hostile-owner/hostile-owner",
+    "html_url": "https://github.com/hostile-owner/hostile-owner",
+    "fork": false,
+    "archived": false,
+    "private": false,
+    "description": "SELF DESCRIPTION 1a2b",
+    "homepage": null,
+    "pushed_at": "2026-05-01T00:00:00Z",
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "public"
+  },
+  {
+    "id": 110,
+    "name": "never-pushed",
+    "full_name": "hostile-owner/never-pushed",
+    "html_url": "https://github.com/hostile-owner/never-pushed",
+    "fork": false,
+    "archived": false,
+    "private": false,
+    "description": "Never pushed, so it sorts last.",
+    "homepage": null,
+    "pushed_at": null,
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "public"
+  }
+]
