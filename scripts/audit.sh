@@ -431,10 +431,46 @@ if ! gh api "users/$OWNER/repos?type=owner&per_page=100" --paginate \
 fi
 while IFS=$'\t' read -r name branch; do
   [ -n "$name" ] || continue
-  if ! gh api "repos/$OWNER/$name/contents/.github/workflows/notify-profile.yml?ref=$branch" --jq .sha > /dev/null 2>&1; then
-    continue
-  fi
+  # The raw file and not just its sha, because one request then answers both of the
+  # questions worth asking: is the hook here, and is it still the file this repository
+  # publishes as the template. A repository without the hook is not a finding -- most of
+  # them have no reason to carry it -- so a fetch that fails or comes back empty moves on
+  # without a word, exactly as the sha check did.
+  installed_hook=$(gh api "repos/$OWNER/$name/contents/.github/workflows/notify-profile.yml?ref=$branch" \
+                     -H 'Accept: application/vnd.github.raw' 2>/dev/null) || continue
+  [ -n "$installed_hook" ] || continue
   hooked=$((hooked + 1))
+  # Drift, and not only presence. Every copy of that file is a copy of
+  # docs/notify-profile.yml from this repository, and all four of them had fallen five
+  # hunks behind it before anything here asked -- naming a hardcoded owner the template
+  # stopped naming, and telling the reader to put a token expiry in their calendar when
+  # what actually happens on expiry is that this whole mechanism goes quiet. The check
+  # above could not notice any of it, because a stale copy has a sha like any other.
+  #
+  # Compared as text rather than as parsed YAML: the part that rots is the setup
+  # instructions in the comments -- which token to make, what it needs, what breaks when
+  # it expires -- and a YAML comparison does not see comments at all.
+  #
+  # Two normalisations. Line endings and trailing whitespace on both sides, because a
+  # checkout on Windows can commit either and neither changes what the file does.
+  # `branches: [main]` on the TEMPLATE side only, rewritten to this repository's default
+  # branch: step 3 of the template's own instructions tells the installer to edit that
+  # line, so a repository on another branch is following the template rather than drifting
+  # from it. Nothing on the installed side is normalised beyond whitespace -- every other
+  # difference there is drift by definition.
+  want_hook=$(tr -d '\r' < docs/notify-profile.yml \
+                | sed "s/[[:space:]]*$//; s/^\([[:space:]]*\)branches: \[main\]/\1branches: [$branch]/")
+  got_hook=$(printf '%s\n' "$installed_hook" | tr -d '\r' | sed 's/[[:space:]]*$//')
+  if [ "$want_hook" = "$got_hook" ]; then
+    ok "$OWNER/$name: its hook is the same file as docs/notify-profile.yml"
+  else
+    # A warning and not a failure. A stale hook still dispatches -- the mechanism has not
+    # changed shape since the first version -- so what is wrong is the instructions a
+    # person reads when the token needs replacing, which is worth a line in the weekly
+    # report and is not worth failing a run over.
+    hook_diff=$(diff <(printf '%s\n' "$want_hook") <(printf '%s\n' "$got_hook"))
+    warn "$OWNER/$name: its hook has drifted from docs/notify-profile.yml -- $(printf '%s\n' "$hook_diff" | grep -c '^[<>]') lines differ, the first at $(printf '%s\n' "$hook_diff" | grep -m1 '^[0-9]'). Copy docs/notify-profile.yml over it. To read the whole diff first: gh api \"repos/$OWNER/$name/contents/.github/workflows/notify-profile.yml?ref=$branch\" -H 'Accept: application/vnd.github.raw' | diff docs/notify-profile.yml -"
+  fi
   # run_started_at is the start of the latest attempt (a re-run moves it; created_at
   # does not), which is what the arrival window below must be anchored on. Every field
   # gets a placeholder: tab is IFS whitespace, and an empty field would shift the rest.
