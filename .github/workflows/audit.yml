@@ -51,6 +51,14 @@ jobs:
         id: audit
         env:
           GH_TOKEN: ${{ github.token }}
+          # Every secret the workflows in this repository reference, so the audit can say
+          # whether it is set. No token Actions can issue is allowed to list secrets, so
+          # without this the weekly run reported "cannot be listed" and the one gap here --
+          # no external monitor -- was visible only to somebody running the script by hand.
+          # An unset secret arrives as an empty string, which is exactly the test. The audit
+          # checks emptiness and never reads the value; keep it that way, and keep this list
+          # in step with what the workflows use (the audit says so when it is not).
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
         # Through bash: a checkout from Windows may not carry the executable bit.
         run: |
           out="$RUNNER_TEMP/audit.txt"

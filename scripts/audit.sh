@@ -309,17 +309,37 @@ fi
 # ----------------------------------------------------------- secrets and variables
 referenced=$(grep -rhoE 'secrets\.[A-Za-z0-9_]+' .github/workflows/ | sed 's/^secrets\.//' | sort -u || true)
 have=$(gh api "repos/$REPO/actions/secrets" --jq '.secrets[].name' 2>/dev/null | sort -u) || have="__unreadable__"
+unset_secret() {  # the same warning whichever way the gap was found
+  case "$1" in
+    HEALTHCHECK_URL) warn "secret HEALTHCHECK_URL is referenced but not set: no external monitor is pinged yet (see the header of update-readme.yml)" ;;
+    *) warn "secret $1 is referenced by a workflow but not set (an unset secret expands to an empty string)" ;;
+  esac
+}
 if [ "$have" = "__unreadable__" ]; then
-  info "secrets cannot be listed with this token (GITHUB_TOKEN never can); run scripts/audit.sh locally for the inventory"
+  # No token Actions can issue will list secrets, so a scheduled run cannot take the
+  # inventory -- and this check used to stop there, which meant the weekly run could never
+  # see the one secret gap this repository has. It can still see the secrets it was handed:
+  # audit.yml passes every secret these workflows reference into this step, where an unset
+  # one arrives as a defined but empty variable. Emptiness is the only thing tested; no
+  # value is read or printed.
+  for name in $referenced; do
+    if env | grep -q "^$name="; then
+      if [ -n "${!name}" ]; then
+        ok "secret $name is referenced and set (passed into this step; its value is not read)"
+      else
+        unset_secret "$name"
+      fi
+    else
+      info "secret $name was not checked: this token cannot list secrets (none of Actions' can) and the secret was not passed in. Add it to the env of the audit step in .github/workflows/audit.yml, or run scripts/audit.sh locally"
+    fi
+  done
+  info "a secret that is set but referenced by nothing cannot be found without the inventory; that half needs a local run"
 else
   for name in $referenced; do
     if printf '%s\n' "$have" | grep -qx "$name"; then
       ok "secret $name is referenced and set"
     else
-      case "$name" in
-        HEALTHCHECK_URL) warn "secret HEALTHCHECK_URL is referenced but not set: no external monitor is pinged yet (see the header of update-readme.yml)" ;;
-        *) warn "secret $name is referenced by a workflow but not set (an unset secret expands to an empty string)" ;;
-      esac
+      unset_secret "$name"
     fi
   done
   for name in $have; do
