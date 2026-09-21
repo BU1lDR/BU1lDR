@@ -5,19 +5,25 @@ a fixtures directory standing in for the API -- and calls build() in-process. Th
 network client is exercised separately with a faked opener, so the "404 is an
 answer, anything else is a failure" rule is pinned on the code that implements it,
 not only on the fixture double.
+
+Nothing here reaches the network. The CI job runs this suite with HTTPS_PROXY pointed
+at a closed port, so a test that did would fail loudly rather than pass by luck.
 """
 
 from __future__ import annotations
 
 import contextlib
 import email.message
+import hashlib
 import io
 import json
 import os
+import random
 import sys
 import tempfile
 import unittest
 import urllib.error
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -31,12 +37,12 @@ START, END = "<!-- work:start -->", "<!-- work:end -->"
 
 
 def repo(name, *, pushed="2026-01-01T00:00:00Z", fork=False, archived=False, private=False,
-         description="", homepage=None, licence="MIT", repo_id=None, visibility=True):
+         description="", homepage=None, licence="MIT", repo_id=None, visibility=True, owner=LOGIN):
     data = {
-        "id": repo_id or abs(hash(name)) % 10_000_000,
+        "id": repo_id or zlib.crc32(name.encode()),  # stable across processes, unlike hash()
         "name": name,
-        "full_name": f"{LOGIN}/{name}",
-        "html_url": f"https://github.com/{LOGIN}/{name}",
+        "full_name": f"{owner}/{name}",
+        "html_url": f"https://github.com/{owner}/{name}",
         "fork": fork,
         "archived": archived,
         "private": private,
@@ -45,13 +51,19 @@ def repo(name, *, pushed="2026-01-01T00:00:00Z", fork=False, archived=False, pri
         "pushed_at": pushed,
         "license": {"spdx_id": licence} if licence else None,
     }
-    if visibility:
+    if visibility is True:
         data["visibility"] = "private" if private else "public"
+    elif visibility:
+        data["visibility"] = visibility
     return data
 
 
+def release(tag, published="2026-02-01T00:00:00Z", *, draft=False, prerelease=False):
+    return {"tag_name": tag, "published_at": published, "draft": draft, "prerelease": prerelease}
+
+
 README_TEMPLATE = (
-    "# Name\n\nIntro that must survive.\n\n## Work\n\n"
+    "# Name\n\nIntro that must survive. $1 $& \\1 <!-- not a marker -->\n\n## Work\n\n"
     f"{START}\nstale\n{END}\n\n### In progress\n\nStatic tail.\n"
 )
 
@@ -79,6 +91,9 @@ class Harness(unittest.TestCase):
     def repos(self, *items):
         (self.fixtures / "repos.json").write_text(json.dumps(list(items)), encoding="utf-8")
 
+    def user(self, public_repos):
+        (self.fixtures / "user.json").write_text(json.dumps({"login": LOGIN, "public_repos": public_repos}), encoding="utf-8")
+
     def repo_detail(self, item, under=None):
         (self.fixtures / "repos" / f"{under or item['name']}.json").write_text(json.dumps(item), encoding="utf-8")
 
@@ -88,10 +103,20 @@ class Harness(unittest.TestCase):
     def release(self, name, data):
         (self.fixtures / "releases" / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
 
-    def run_build(self, check=False):
+    def run_build(self, check=False, **kwargs):
+        """Run the builder and, on every path, assert the marker invariant: exactly
+        one START and one END before and after, whatever else happened."""
+        before = (self.root / "README.md").read_text(encoding="utf-8")
+        self.assertEqual((before.count(START), before.count(END)), (1, 1))
         out = io.StringIO()
-        code = br.build(self.root, br.Fixtures(self.fixtures), check, self.root / "summary.md", out=out)
-        return code, out.getvalue(), (self.root / "README.md").read_text(encoding="utf-8")
+        self.report = {}
+        try:
+            code = br.build(self.root, br.Fixtures(self.fixtures), check, self.root / "summary.md", out=out,
+                            report=self.report, **kwargs)
+        finally:
+            after = (self.root / "README.md").read_text(encoding="utf-8")
+            self.assertEqual((after.count(START), after.count(END)), (1, 1))
+        return code, out.getvalue(), after
 
     def readme_bytes(self):
         return (self.root / "README.md").read_bytes()
@@ -105,21 +130,23 @@ class Harness(unittest.TestCase):
         return br.sections_by_repo(br.inner_block(readme, START, END), LOGIN)
 
     def assert_refused(self, message_fragment=""):
-        before = (self.root / "README.md").read_text(encoding="utf-8")
+        before = self.readme_bytes()
         with self.assertRaises(br.BuildError) as caught:
             self.run_build()
         self.assertIn(message_fragment, str(caught.exception))
-        self.assertEqual((self.root / "README.md").read_text(encoding="utf-8"), before)
+        self.assertEqual(self.readme_bytes(), before)
+        return caught.exception
 
 
 class Selection(Harness):
-    def test_forks_archived_private_excluded_and_self_are_skipped(self):
+    def test_forks_archived_private_internal_excluded_and_self_are_skipped(self):
         self.repos(
             repo("first"),
             repo("a-fork", fork=True),
             repo("old", archived=True),
             repo("secret", private=True),
             repo("secret-no-visibility-field", private=True, visibility=False),
+            repo("internal-only", private=False, visibility="internal"),
             repo("scratch"),
             repo(LOGIN, description="Profile README"),
         )
@@ -147,6 +174,14 @@ class Selection(Harness):
         _, _, readme = self.run_build()
         self.assertEqual(list(self.sections(readme)), ["second", "first", "alpha", "zeta", "never"])
 
+    def test_same_pushed_at_is_broken_by_name_then_id_not_by_listing_order(self):
+        self.uncurated()
+        same = "2026-04-01T00:00:00Z"
+        self.repos(repo("delta", pushed=same, description="d"), repo("Bravo", pushed=same, description="b"),
+                   repo("alpha", pushed=same, description="a"))
+        _, _, readme = self.run_build()
+        self.assertEqual(list(self.sections(readme)), ["alpha", "Bravo", "delta"])
+
     def test_curated_name_that_matches_nothing_is_warned_about_in_output_and_summary(self):
         self.repos(repo("first"))
         self.profile("first", "# first — t\n\nbody\n")
@@ -158,11 +193,51 @@ class Selection(Harness):
         self.repos(repo("a-fork", fork=True))
         self.assert_refused("no public repositories")
 
+    def test_listing_shorter_than_the_accounts_public_count_is_refused(self):
+        self.uncurated()
+        self.repos(repo("first", description="a"), repo("second", description="b"), repo("hidden", private=True))
+        self.user(3)  # the account says three public; the listing has two -- a page was dropped
+        self.assert_refused("returned 2 public repositories but the account reports 3")
+        self.user(2)
+        code, _, _ = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.report["public_repos"], 2)
+
+
+class PrivateDataLeak(Harness):
+    """1.9: nothing about a private, internal, forked or archived repository -- name,
+    description or count -- reaches the README, the summary, the log or the run
+    record, whatever the listing contained."""
+
+    SECRETS = ("secret-project", "TOP SECRET 7f3a", "internal-tool", "INTERNAL ONLY 9c2e",
+               "hidden-no-vis", "HIDDEN 4b4b", "forked-thing", "FORK 5d1b", "old-archive", "ARCHIVED 3e8a")
+
+    def test_private_and_internal_repositories_leave_no_trace(self):
+        self.uncurated()
+        self.repos(
+            repo("pub", description="public words"),
+            repo("secret-project", private=True, description="TOP SECRET 7f3a"),
+            repo("internal-tool", private=False, visibility="internal", description="INTERNAL ONLY 9c2e"),
+            repo("hidden-no-vis", private=True, visibility=False, description="HIDDEN 4b4b"),
+            repo("forked-thing", fork=True, description="FORK 5d1b"),
+            repo("old-archive", archived=True, description="ARCHIVED 3e8a"),
+        )
+        self.user(3)  # pub, forked-thing, old-archive are the public ones GitHub would count
+        code, out, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertEqual(list(self.sections(readme)), ["pub"])
+        surfaces = {"README.md": readme, "summary": self.summary(), "stdout": out,
+                    "run record": json.dumps(self.report)}
+        for surface, text in surfaces.items():
+            for secret in self.SECRETS:
+                self.assertNotIn(secret, text, f"{secret!r} leaked into {surface}")
+        self.assertEqual((self.report["repos_public"], self.report["repos_selected"], self.report["sections"]), (3, 1, 1))
+
 
 class Rendering(Harness):
     def test_profile_md_drives_heading_and_body_with_placeholders(self):
         self.repos(repo("first", homepage="https://x.example/"))
-        self.release("first", {"tag_name": "v2.0.0", "published_at": "2026-02-01T00:00:00Z"})
+        self.release("first", release("v2.0.0"))
         self.profile("first", "<!-- rendered elsewhere -->\n\n# Shown Name — does a thing ([live]({live}))\n\n"
                               "{license}, {version}.\n\n- a bullet\n- another\n")
         _, _, readme = self.run_build()
@@ -191,10 +266,10 @@ class Rendering(Harness):
     def test_release_choice_ignores_drafts_and_prereleases_and_uses_publish_date(self):
         self.repos(repo("first"))
         self.release("first", [
-            {"tag_name": "v3.0.0-rc1", "prerelease": True, "published_at": "2026-05-01T00:00:00Z"},
-            {"tag_name": "v9.9.9", "draft": True, "published_at": "2026-06-01T00:00:00Z"},
-            {"tag_name": "v2.1.0", "published_at": "2026-03-01T00:00:00Z"},   # first eligible in list order
-            {"tag_name": "v2.0.1", "published_at": "2026-04-01T00:00:00Z"},   # but published later
+            release("v3.0.0-rc1", "2026-05-01T00:00:00Z", prerelease=True),
+            release("v9.9.9", "2026-06-01T00:00:00Z", draft=True),
+            release("v2.1.0", "2026-03-01T00:00:00Z"),   # first eligible in list order
+            release("v2.0.1", "2026-04-01T00:00:00Z"),   # but published later
         ])
         self.profile("first", "# first — t\n\n{version}\n")
         _, _, readme = self.run_build()
@@ -226,10 +301,12 @@ class Rendering(Harness):
 
     def test_description_only_repo_with_empty_description_gets_a_placeholder_body(self):
         self.uncurated()
-        self.repos(repo("bare", description=""), repo("shouty", description="# Not a heading please"))
+        self.repos(repo("bare", description=""), repo("shouty", description="# Not a heading please"),
+                   repo("nulled", description=None))
         _, _, readme = self.run_build()
         sections = self.sections(readme)
         self.assertEqual(sections["bare"], "### [bare](https://github.com/someone/bare)\n\nNo description yet.\n")
+        self.assertEqual(sections["nulled"], "### [nulled](https://github.com/someone/nulled)\n\nNo description yet.\n")
         self.assertIn("\n\n\\# Not a heading please\n", sections["shouty"])
 
     def test_curated_repository_without_a_source_is_an_error(self):
@@ -246,20 +323,223 @@ class Rendering(Harness):
         self.assertIn("is empty once comments are stripped", out)
         self.assertEqual(self.sections(readme)["first"], "### [first](https://github.com/someone/first)\n\nd\n")
 
-    def test_text_outside_the_markers_is_untouched_and_notice_is_first(self):
+    def test_text_outside_the_markers_is_untouched_and_notice_and_stamp_come_first(self):
         self.repos(repo("first"))
         self.profile("first", "# first — t\n\nbody\n")
         _, _, readme = self.run_build()
-        self.assertTrue(readme.startswith("# Name\n\nIntro that must survive.\n\n## Work\n\n" + START + "\n" + br.NOTICE + "\n"))
-        self.assertTrue(readme.endswith(END + "\n\n### In progress\n\nStatic tail.\n"))
+        head, tail = README_TEMPLATE.split(f"{START}\nstale\n{END}")
+        self.assertTrue(readme.startswith(head + START + "\n" + br.NOTICE + "\n<!-- build: sections=1 digest="))
+        self.assertTrue(readme.endswith(END + tail))
         self.assertNotIn("stale", readme)
         inner = br.inner_block(readme, START, END)
         self.assertNotIn(br.NOTICE, inner)
+        self.assertNotIn("<!-- build:", inner)
         self.assertTrue(inner.startswith(br.section_mark("first") + "\n### [first]("), inner)
         self.assertTrue(inner.endswith("\n") and not inner.endswith("\n\n"))
 
+    def test_build_stamp_names_the_section_count_and_the_digest_of_the_sections(self):
+        self.uncurated()
+        self.repos(repo("a", description="x"), repo("b", description="y"))
+        _, _, readme = self.run_build()
+        stamp = next(line for line in readme.split("\n") if line.startswith("<!-- build:"))
+        match = br.BUILD_STAMP.match(stamp)
+        self.assertEqual(match.group("sections"), "2")
+        self.assertEqual(match.group("digest"), hashlib.sha256(br.inner_block(readme, START, END).encode()).hexdigest()[:12])
+
+
+class Idempotency(Harness):
+    """1.2: the same inputs in any order, on any clock, in any zone, are the same bytes."""
+
+    def inventory(self):
+        same = "2026-04-01T00:00:00Z"
+        return [
+            repo("second", pushed=same, description="two"),
+            repo("first", pushed=same, homepage="https://x.example/"),
+            repo("gamma", pushed=same, description="g"),
+            repo("beta", pushed=same, description="b"),
+            repo("alpha", pushed="2026-05-01T00:00:00Z", description="a"),
+            repo("never", pushed=None, description="n"),
+            repo("also-never", pushed=None, description="n2"),
+        ]
+
+    def releases(self):
+        return [release("v1.0.0", "2026-01-01T00:00:00Z"), release("v1.0.1", "2026-02-01T00:00:00Z"),
+                release("v1.1.0-rc1", "2026-03-01T00:00:00Z", prerelease=True),
+                release("v1.0.2", "2026-02-01T00:00:00Z")]  # ties v1.0.1 on date; the greater tag wins
+
+    def render(self, seed):
+        inventory, releases = self.inventory(), self.releases()
+        if seed is not None:
+            random.Random(seed).shuffle(inventory)
+            random.Random(seed).shuffle(releases)
+        self.repos(*inventory)
+        self.release("first", releases)
+        self.profile("first", "# first — t ([live]({live}))\n\n{version} {license}\n")
+        self.profile("second", "# second — t\n\nbody\n")
+        (self.root / "README.md").write_text(README_TEMPLATE, encoding="utf-8", newline="\n")
+        code, _, _ = self.run_build()
+        self.assertEqual(code, 0)
+        return hashlib.sha256(self.readme_bytes()).hexdigest()
+
+    def test_shuffled_inventory_and_releases_render_identical_bytes(self):
+        reference = self.render(None)
+        for seed in range(6):
+            self.assertEqual(self.render(seed), reference, f"shuffle seed {seed} changed the output")
+        self.assertIn("v1.0.2 MIT", self.readme_bytes().decode())
+
+    def test_second_run_writes_nothing_and_the_file_is_byte_identical(self):
+        self.render(None)
+        first = self.readme_bytes()
+        code, out, _ = self.run_build()
+        self.assertEqual((code, self.readme_bytes()), (0, first))
+        self.assertIn("current", out)
+
+    def test_now_and_tz_do_not_reach_the_readme(self):
+        stamps = []
+        for now, tz in (("2026-12-31T23:59:59Z", "UTC"), ("2027-01-01T00:00:00Z", "Asia/Kolkata"),
+                        ("1893456000", "America/New_York")):
+            with mock.patch.dict(os.environ, {"NOW": now, "TZ": tz}):
+                if hasattr(os, "tzset"):
+                    os.tzset()
+                stamps.append((self.render(None), br.utc_now()))
+        try:
+            if hasattr(os, "tzset"):
+                os.tzset()
+        finally:
+            pass
+        self.assertEqual(len({digest for digest, _ in stamps}), 1, "the clock or the zone changed README.md")
+        self.assertEqual([stamp for _, stamp in stamps],
+                         ["2026-12-31T23:59:59Z", "2027-01-01T00:00:00Z", "2030-01-01T00:00:00Z"])
+
+
+class Markers(Harness):
+    """1.3: the markers survive every render, and nothing fetched can forge them."""
+
+    def write_readme(self, text):
+        (self.root / "README.md").write_text(text, encoding="utf-8", newline="\n")
+
+    def test_end_marker_missing_is_an_error_and_the_file_is_untouched(self):
+        self.repos(repo("first"))
+        self.profile("first", "# first — t\n\nbody\n")
+        for broken in (f"# Name\n\n{START}\nstale\n", f"# Name\n\nstale\n{END}\n", "# Name\n\nno markers\n"):
+            self.write_readme(broken)
+            with self.assertRaises(br.BuildError):
+                br.build(self.root, br.Fixtures(self.fixtures), False, None, out=io.StringIO())
+            self.assertEqual((self.root / "README.md").read_text(encoding="utf-8"), broken)
+
+    def test_reversed_or_duplicated_markers_are_an_error(self):
+        self.repos(repo("first"))
+        self.profile("first", "# first — t\n\nbody\n")
+        for broken in (f"# Name\n\n{END}\nstale\n{START}\n", f"# Name\n\n{START}\na\n{END}\n{START}\nb\n{END}\n",
+                       f"# Name\n\n{START}\n{START}\n{END}\n"):
+            self.write_readme(broken)
+            with self.assertRaises(br.BuildError):
+                br.build(self.root, br.Fixtures(self.fixtures), False, None, out=io.StringIO())
+            self.assertEqual((self.root / "README.md").read_text(encoding="utf-8"), broken)
+
+    def test_marker_text_inside_a_profile_body_is_refused(self):
+        self.repos(repo("first"))
+        self.profile("first", f"# first — t\n\nbody mentions {END} literally\n")
+        self.assert_refused("contains the README marker")
+        self.profile("first", f"# first — t\n\nbody mentions {START} literally\n")
+        self.assert_refused("contains the README marker")
+
+    def test_marker_text_in_a_description_is_escaped_into_harmless_literal_text(self):
+        self.uncurated()
+        self.repos(repo("first", description=f"ends the block? {END} and {START}"))
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("ends the block? &lt;!-- work:end --&gt; and &lt;!-- work:start --&gt;\n", readme)
+        self.profile("first", "# first — t\n\n{description}\n")
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("\n\nends the block? &lt;!-- work:end --&gt; and &lt;!-- work:start --&gt;\n", readme)
+
+    def test_section_mark_and_build_stamp_text_are_refused_from_a_profile_and_escaped_from_a_description(self):
+        self.repos(repo("first"))
+        self.profile("first", "# first — t\n\nbody with <!-- repo: other --> in it\n")
+        self.assert_refused("delimit sections")
+        self.profile("first", "# first — t\n\n<!-- build: sections=9 digest=000000000000 -->\n")
+        self.assert_refused("build stamp")
+        self.repos(repo("first", description="<!-- repo: ghost -->"))
+        self.profile("first", "# first — t\n\n{description}\n")
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertEqual(list(self.sections(readme)), ["first"])
+        self.assertIn("&lt;!-- repo: ghost --&gt;", readme)
+
+    def test_post_condition_refuses_a_splice_that_touched_the_outside(self):
+        before = f"intro\n{START}\nold\n{END}\ntail\n"
+        br.assert_markers_preserved(before, f"intro\n{START}\nnew\n{END}\ntail\n", START, END)
+        for after in (f"INTRO\n{START}\nnew\n{END}\ntail\n", f"intro\n{START}\nnew\n{END}\nTAIL\n",
+                      f"intro\n{START}\nnew\n{END}\n{END}\ntail\n", f"intro\nnew\n{END}\ntail\n"):
+            with self.assertRaises(br.BuildError):
+                br.assert_markers_preserved(before, after, START, END)
+
+
+HOSTILE_DESCRIPTION = (
+    "Title $& $' $` $1 \\1 | un`balanced <script>alert(1)</script> <img src=x onerror=1> "
+    '<a href="https://evil.example">x</a> <details><summary>s</summary></details> <picture></picture> '
+    "[x](y) *stars* _under_ snake_case_name :shortcode: &amp; مرحبا بالعالم\n# not a heading "
+    f"{END} <!-- repo: ghost --> " + "x" * 300
+)
+HOSTILE_ESCAPED = (
+    "Title $&amp; $' $\\` $1 \\\\1 \\| un\\`balanced &lt;script&gt;alert(1)&lt;/script&gt; &lt;img src=x onerror=1&gt; "
+    '&lt;a href="https://evil.example"&gt;x&lt;/a&gt; &lt;details&gt;&lt;summary&gt;s&lt;/summary&gt;&lt;/details&gt; '
+    "&lt;picture&gt;&lt;/picture&gt; \\[x\\](y) \\*stars\\* \\_under\\_ snake\\_case\\_name :shortcode: &amp;amp; "
+    "مرحبا بالعالم # not a heading &lt;!-- work:end --&gt; &lt;!-- repo: ghost --&gt; " + "x" * 300
+)
+
 
 class HostileInput(Harness):
+    def test_every_hostile_string_in_one_description_renders_as_exactly_this(self):
+        self.uncurated()
+        self.repos(repo("first", description=HOSTILE_DESCRIPTION), repo("second", description="# Heading\n- item"))
+        self.release("first", release("v1.0_beta|<1>&2`3$1"))
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.sections(readme)["first"],
+                         f"### [first](https://github.com/someone/first)\n\n{HOSTILE_ESCAPED}\n")
+        self.assertEqual(self.sections(readme)["second"],
+                         "### [second](https://github.com/someone/second)\n\n\\# Heading - item\n")
+        self.profile("first", "# first — {version} $1 \\1\n\n{description}\n\n`{version}` is literal here.\n")
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.sections(readme)["first"],
+                         "### [first](https://github.com/someone/first) — v1.0\\_beta\\|&lt;1&gt;&amp;2\\`3$1 $1 \\1\n\n"
+                         f"{HOSTILE_ESCAPED}\n\n`v1.0\\_beta\\|&lt;1&gt;&amp;2\\`3$1` is literal here.\n")
+
+    def test_escape_text_rules(self):
+        cases = {
+            "": "",
+            "plain words": "plain words",
+            "a\r\nb\rc\nd": "a b c d",
+            "  padded  ": "padded",
+            "tab\tand\x00nul\x1b[0m": "tab\tandnul\\[0m",
+            "# heading": "\\# heading",
+            "> quote": "&gt; quote",
+            "- item": "\\- item",
+            "+ item": "\\+ item",
+            "1. item": "\\1. item",
+            "12) item": "\\12) item",
+            "= rule": "= rule",
+            "---": "\\---",
+            "===": "\\===",
+            "-item": "-item",
+            "-": "\\-",
+            "1.2.3 version": "1.2.3 version",
+            "#1 on a list": "#1 on a list",
+            "<!-- x -->": "&lt;!-- x --&gt;",
+            "$& $1 $` $' \\1": "$&amp; $1 $\\` $' \\\\1",
+            "a|b": "a\\|b",
+            "`code": "\\`code",
+            "~~strike~~": "\\~\\~strike\\~\\~",
+            "&amp; &lt;": "&amp;amp; &amp;lt;",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(br.escape_text(value), expected)
+
     def test_crlf_and_lone_cr_profiles_are_normalised_and_the_next_run_is_current(self):
         self.repos(repo("first"))
         self.profile("first", b"# first \xe2\x80\x94 tail\r\n\r\nline one\r\nline two\rline three\n")
@@ -275,12 +555,23 @@ class HostileInput(Harness):
         self.profile("first", b"\xef\xbb\xbf<!-- note -->\n# Shown \xe2\x80\x94 tail\n\nbody\n")
         _, _, readme = self.run_build()
         self.assertTrue(self.sections(readme)["first"].startswith("### [Shown](https://github.com/someone/first) — tail\n"))
-        self.assertNotIn("﻿", readme)
+        self.assertNotIn("\ufeff", readme)
 
     def test_non_utf8_profile_is_an_error(self):
         self.repos(repo("first"))
         self.profile("first", b"# caf\xe9 \xe2\x80\x94 tail\n\nbody\n")
         self.assert_refused("is not UTF-8")
+
+    def test_control_characters_in_a_profile_are_an_error_but_tabs_are_fine(self):
+        self.repos(repo("first"))
+        self.profile("first", b"# first \xe2\x80\x94 tail\n\nbody with a \x01 in it\n")
+        self.assert_refused("control character U+0001 on line 3")
+        self.profile("first", b"# first \xe2\x80\x94 tail\n\nbody\x1b[0m\n")
+        self.assert_refused("control character U+001B")
+        self.profile("first", b"# first \xe2\x80\x94 tail\n\n\tindented\tbody\n")
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("\n\n\tindented\tbody\n", readme)
 
     def test_oversized_profile_and_oversized_readme_are_refused(self):
         self.repos(repo("first"))
@@ -290,28 +581,14 @@ class HostileInput(Harness):
             self.profile("first", "# first — t\n\n" + "y" * 150 + "\n")
             self.assert_refused("rebuilt README would be")
 
-    def test_marker_text_inside_a_section_is_refused(self):
-        self.repos(repo("first"))
-        self.profile("first", f"# first — t\n\nbody mentions {END} literally\n")
-        self.assert_refused("contains the README marker")
-
-    def test_section_mark_text_is_refused_from_every_source(self):
-        self.repos(repo("first"))
-        self.profile("first", "# first — t\n\nbody with <!-- repo: other --> in it\n")
-        self.assert_refused("delimit sections")
-        self.repos(repo("first", description="<!-- repo: ghost -->"))
-        self.profile("first", "# first — t\n\n{description}\n")
-        self.assert_refused("delimit sections")
-        self.uncurated()
-        (self.fixtures / "profiles" / "first.md").unlink()
-        self.assert_refused("delimit sections")
-
     def test_live_placeholder_without_a_valid_homepage_is_refused_but_escaped_or_commented_is_fine(self):
         self.repos(repo("first", homepage=None))
         self.profile("first", "# first — site ([live]({live}))\n\nbody\n")
         self.assert_refused("uses {live}")
-        self.repos(repo("first", homepage="bu1ldr.github.io/x) not a url"))
-        self.assert_refused("uses {live}")
+        for bad in ("bu1ldr.github.io/x) not a url", "https://x.example/a)b", "https://x.example/a\\b",
+                    'https://x.example/a"b', "javascript:alert(1)", "https://x.example/ space"):
+            self.repos(repo("first", homepage=bad))
+            self.assert_refused("uses {live}")
         self.repos(repo("first", homepage=None))
         self.profile("first", "<!-- placeholders: {live} {version} -->\n# first — t\n\nwrite {{live}} for a literal\n")
         code, _, readme = self.run_build()
@@ -347,12 +624,14 @@ class HostileInput(Harness):
         self.profile("first", "first — a tail without the hash\n\nbody\n")
         self.assert_refused("first line must be")
 
-    def test_body_opening_with_a_real_heading_is_refused_but_a_hashtag_is_not(self):
+    def test_body_opening_with_a_real_heading_is_refused_but_a_description_cannot_open_one(self):
         self.repos(repo("first", description="# via placeholder"))
         self.profile("first", "# first — t\n\n## Not the title form\n\nbody\n")
         self.assert_refused("opens with a heading")
         self.profile("first", "# first — t\n\n{description}\n")
-        self.assert_refused("opens with a heading")
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("\n\n\\# via placeholder\n", readme)
         self.profile("first", "# first — t\n\n#1 on the roadmap.sh list\n")
         code, _, readme = self.run_build()
         self.assertEqual(code, 0)
@@ -377,6 +656,93 @@ class HostileInput(Harness):
                                   br.render_section(repo("b", description="body b"), None, None)])
         # Same sections, same order, only the marks differ: the one-time transition message.
         self.assertEqual(br.describe_change(legacy, marked, LOGIN), ["block: changed outside any repository section"])
+
+
+class SchemaGuard(Harness):
+    """2.5 / 1.4: a field the API renamed, dropped or retyped is an error before anything
+    is rendered, and the README is untouched."""
+
+    def test_each_required_repository_field_is_checked(self):
+        self.uncurated()
+        good = repo("first", description="ok")
+        for field in ("id", "name", "full_name", "html_url", "fork", "archived", "private", "description",
+                      "homepage", "pushed_at", "license"):
+            broken = dict(good)
+            del broken[field]
+            self.repos(broken)
+            with self.subTest(missing=field):
+                self.assert_refused(f"field {field!r} is missing")
+        for field, wrong in (("id", "1"), ("id", True), ("name", 3), ("fork", "no"), ("private", 0),
+                             ("description", 5), ("license", "MIT"), ("visibility", 1)):
+            broken = dict(good, **{field: wrong})
+            self.repos(broken)
+            with self.subTest(retyped=field):
+                self.assert_refused(f"field {field!r} is")
+        self.repos(dict(good, license={"name": "MIT"}))
+        self.assert_refused("field 'spdx_id' is missing")
+
+    def test_names_urls_and_visibility_values_are_checked(self):
+        self.uncurated()
+        self.repos(dict(repo("first"), name="bad name"))
+        self.assert_refused("is not a GitHub repository name")
+        self.repos(dict(repo("first"), full_name="someone/other"))
+        self.assert_refused("does not match name")
+        self.repos(dict(repo("first"), html_url="https://evil.example/someone/first"))
+        self.assert_refused("is not https://github.com/someone/first")
+        self.repos(dict(repo("first"), visibility="secret"))
+        self.assert_refused("visibility 'secret' is not one of")
+        self.repos("not an object")
+        self.assert_refused("expected a repository object")
+
+    def test_release_fields_are_checked(self):
+        self.uncurated()
+        self.repos(repo("first", description="x"))
+        for bad in ({"tag_name": "v1"}, {"tag_name": "v1", "draft": False, "prerelease": "no", "published_at": None},
+                    [{"tag_name": 1, "draft": False, "prerelease": False, "published_at": None}], ["v1"]):
+            self.release("first", bad)
+            with self.subTest(release=bad):
+                self.assert_refused("first.json")
+
+    def test_config_login_is_required(self):
+        (self.root / "profile.config.json").write_text(json.dumps({"order": []}), encoding="utf-8")
+        self.repos(repo("first"))
+        with self.assertRaises(br.BuildError):
+            br.build(self.root, br.Fixtures(self.fixtures), False, None, out=io.StringIO())
+
+
+class ShrinkGuard(Harness):
+    def two_sections(self):
+        self.uncurated()
+        long = "# first — t\n\n" + "words " * 40 + "\n\n" + "more " * 40 + "\n"
+        self.repos(repo("first"), repo("second"))
+        self.profile("first", long)
+        self.profile("second", long.replace("first", "second"))
+        code, _, _ = self.run_build()
+        self.assertEqual(code, 0)
+
+    def test_a_collapsed_source_with_nothing_removed_is_refused_unless_allowed(self):
+        self.two_sections()
+        self.profile("first", "# first — t\n\nshort\n")
+        self.assert_refused("would shrink from")
+        code, out, readme = self.run_build(allow_shrink=True)
+        self.assertEqual(code, 0)
+        self.assertIn("allowed by --allow-shrink", out)
+        self.assertIn("\n\nshort\n", readme)
+
+    def test_a_shrink_explained_by_a_verified_removal_is_fine(self):
+        self.two_sections()
+        self.repos(repo("first"))  # second deleted; get_repo answers 404
+        code, out, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("second: removed", out)
+        self.assertEqual(list(self.sections(readme)), ["first"])
+
+    def test_the_first_render_over_a_placeholder_block_is_never_a_shrink(self):
+        self.uncurated()
+        (self.root / "README.md").write_text(README_TEMPLATE.replace("stale", "x" * 5000), encoding="utf-8", newline="\n")
+        self.repos(repo("first", description="tiny"))
+        code, _, _ = self.run_build()
+        self.assertEqual(code, 0)
 
 
 class Lifecycle(Harness):
@@ -450,22 +816,20 @@ class Lifecycle(Harness):
                      "oldname: removed", "newname: added"):
             self.assertIn(line, out)
         self.assertIn("oldname appears to have been renamed to 'newname'", out)
-        # Both uncurated with the same pushed_at, so the listing order is kept.
+        # Both uncurated with the same pushed_at: by name, "first" before "newname".
         self.assertEqual(list(self.sections(readme)), ["first", "newname"])
 
-    def test_notice_only_repair_is_reported_as_a_change(self):
+    def test_notice_or_stamp_repair_is_reported_as_a_change(self):
         self.repos(repo("first"))
         self.profile("first", "# first — t\n\nbody\n")
         _, _, readme = self.run_build()
         (self.root / "README.md").write_text(readme.replace(br.NOTICE + "\n", ""), encoding="utf-8", newline="\n")
         _, out, _ = self.run_build()
-        self.assertIn("block: notice line or spacing restored", out)
-
-    def test_missing_marker_is_an_error(self):
-        self.repos(repo("first"))
-        (self.root / "README.md").write_text("# Name\n\nno markers here\n", encoding="utf-8")
-        with self.assertRaises(br.BuildError):
-            self.run_build()
+        self.assertIn("block: notice, stamp or spacing restored", out)
+        stamp = next(line for line in readme.split("\n") if line.startswith("<!-- build:"))
+        (self.root / "README.md").write_text(readme.replace(stamp + "\n", ""), encoding="utf-8", newline="\n")
+        _, out, _ = self.run_build()
+        self.assertIn("block: notice, stamp or spacing restored", out)
 
     def test_outage_is_an_error_not_an_empty_section(self):
         self.repos(repo("first"))
@@ -476,7 +840,7 @@ class Lifecycle(Harness):
         self.repos(repo("first"))
         (self.root / "README.md").write_bytes(README_TEMPLATE.replace("\n", "\r\n").encode())
         with self.assertRaises(br.BuildError):
-            self.run_build()
+            br.build(self.root, br.Fixtures(self.fixtures), False, None, out=io.StringIO())
 
     def test_summary_is_written_before_readme_and_appended_to_step_summary(self):
         self.repos(repo("first"))
@@ -491,24 +855,160 @@ class Lifecycle(Harness):
         self.assertIn("No section changed.", text)
         self.assertIn("Sources:\n  first: .github/PROFILE.md", text)
 
-    def test_main_maps_errors_to_exit_2(self):
+    def test_report_records_counts_sizes_changes_and_warnings(self):
+        self.uncurated()
+        self.repos(repo("first", description="a"), repo("second", description="b"))
+        self.run_build()
+        report = self.report
+        self.assertEqual((report["repos_public"], report["repos_selected"], report["sections"]), (2, 2, 2))
+        self.assertEqual(report["block_bytes_before"], len("stale\n"))
+        self.assertEqual(report["block_bytes"], len(br.inner_block(self.readme_bytes().decode(), START, END).encode()))
+        self.assertEqual(report["readme_bytes"], len(self.readme_bytes()))
+        self.assertEqual(report["changes"], ["first: added", "second: added"])
+        self.assertTrue(report["changed"])
+        self.assertEqual(len(report["warnings"]), 2)
+        self.assertEqual(report["provenance"], ["first: description", "second: description"])
+        self.assertIsNone(report["public_repos"])
+
+
+class Main(Harness):
+    """The command line: exit codes, the token rule, the owner check, the run record."""
+
+    def setUp(self):
+        super().setUp()
+        # main() reports on stdout and stderr; keep both out of the test log, where an
+        # "error:" line from a passing test reads like a failing one.
+        for stream in ("sys.stdout", "sys.stderr"):
+            patcher = mock.patch(stream, new_callable=io.StringIO)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def argv(self, *extra):
+        return ["--root", str(self.root), "--fixtures", str(self.fixtures), *extra]
+
+    def meta(self):
+        return json.loads((self.root / "meta" / "last-run.json").read_text(encoding="utf-8"))
+
+    def test_main_maps_errors_to_exit_2_and_records_them(self):
         # main() reports on stderr; keep that out of the test log, where an "error:"
         # line from a passing test reads like a failing one.
-        argv = ["--root", str(self.root), "--fixtures", str(self.fixtures)]
         self.repos(repo("a-fork", fork=True))
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(br.main(argv), br.EXIT_ERROR)
+            self.assertEqual(br.main(self.argv()), br.EXIT_ERROR)
         self.assertIn("no public repositories", err.getvalue())
+        self.assertIn("README.md left untouched.", err.getvalue())
+        meta = self.meta()
+        self.assertEqual((meta["status"], meta["exit_code"]), ("error", 2))
+        self.assertIn("no public repositories", meta["error"])
+        self.assertEqual(meta["source"]["kind"], "fixtures")
         (self.fixtures / "repos.json").unlink()  # an unforeseen exception, not a BuildError
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(br.main(argv), br.EXIT_ERROR)
+            self.assertEqual(br.main(self.argv()), br.EXIT_ERROR)
         self.assertIn("unexpected", err.getvalue())
+        self.assertEqual(self.meta()["status"], "error")
+
+    def test_a_good_run_records_ok_and_the_record_is_stable_under_now(self):
+        self.uncurated()
+        self.repos(repo("first", description="a"))
+        with mock.patch.dict(os.environ, {"NOW": "2026-09-21T12:00:00Z"}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(br.main(self.argv()), br.EXIT_OK)
+            first = (self.root / "meta" / "last-run.json").read_bytes()
+            self.assertEqual(br.main(self.argv()), br.EXIT_OK)
+            second = (self.root / "meta" / "last-run.json").read_bytes()
+        meta = json.loads(first)
+        self.assertEqual((meta["status"], meta["exit_code"], meta["finished_at"]), ("ok", 0, "2026-09-21T12:00:00Z"))
+        self.assertEqual((meta["sections"], meta["changed"]), (1, True))
+        self.assertEqual(json.loads(second)["changed"], False)
+        self.assertEqual(json.loads(second)["finished_at"], "2026-09-21T12:00:00Z")
+        self.assertTrue(first.endswith(b"\n") and b"\r" not in first)
+        self.assertEqual(json.dumps(meta, indent=2, sort_keys=True, ensure_ascii=False) + "\n", first.decode())
+
+    def test_check_and_no_meta_write_no_record(self):
+        self.uncurated()
+        self.repos(repo("first", description="a"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(br.main(self.argv("--check")), br.EXIT_STALE)
+            self.assertFalse((self.root / "meta").exists())
+            self.assertEqual(br.main(self.argv("--no-meta")), br.EXIT_OK)
+            self.assertFalse((self.root / "meta").exists())
+            self.assertEqual(br.main(self.argv("--meta-file", str(self.root / "elsewhere.json"))), br.EXIT_OK)
+        self.assertEqual(json.loads((self.root / "elsewhere.json").read_text())["status"], "ok")
+
+    def test_bad_now_is_an_error_with_a_record(self):
+        self.uncurated()
+        self.repos(repo("first", description="a"))
+        with mock.patch.dict(os.environ, {"NOW": "yesterday"}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(br.main(self.argv()), br.EXIT_ERROR)
+        self.assertIn("NOW='yesterday'", err.getvalue())
+        self.assertEqual(self.meta()["status"], "error")
+        self.assertRegex(self.meta()["finished_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        with mock.patch.dict(os.environ, {"NOW": "2026-01-01T00:00:00"}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(br.main(self.argv()), br.EXIT_ERROR)
+        self.assertIn("has no zone", err.getvalue())
+
+    def test_missing_or_empty_token_fails_before_any_request(self):
+        self.uncurated()
+        self.repos(repo("first", description="a"))
+        for token in ({}, {"GITHUB_TOKEN": ""}, {"GITHUB_TOKEN": "   "}):
+            env = {"PROFILE_FIXTURES": ""}
+            env.update(token)
+            with mock.patch.dict(os.environ, env, clear=False), \
+                 mock.patch.object(br, "_open", side_effect=AssertionError("network was touched")) as opened, \
+                 contextlib.redirect_stderr(io.StringIO()) as err:
+                os.environ.pop("PROFILE_FIXTURES", None)
+                if not token:
+                    os.environ.pop("GITHUB_TOKEN", None)
+                self.assertEqual(br.main(["--root", str(self.root)]), br.EXIT_ERROR)
+            self.assertIn("GITHUB_TOKEN is not set or is empty", err.getvalue())
+            opened.assert_not_called()
+        self.assertEqual(self.meta()["status"], "error")
+        self.assertEqual(self.readme_bytes().decode(), README_TEMPLATE)
+
+    def test_profile_fixtures_env_is_the_same_as_the_flag(self):
+        self.uncurated()
+        self.repos(repo("first", description="a"))
+        with mock.patch.dict(os.environ, {"PROFILE_FIXTURES": str(self.fixtures)}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            os.environ.pop("GITHUB_TOKEN", None)
+            self.assertEqual(br.main(["--root", str(self.root)]), br.EXIT_OK)
+
+    def test_owner_mismatch_is_an_error_in_network_mode_only(self):
+        self.uncurated()
+        self.repos(repo("first", description="a"))
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t", "GITHUB_REPOSITORY_OWNER": "renamed"}), \
+             mock.patch.object(br, "_open", side_effect=AssertionError("network was touched")), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            os.environ.pop("PROFILE_FIXTURES", None)
+            self.assertEqual(br.main(["--root", str(self.root)]), br.EXIT_ERROR)
+        self.assertIn("names 'someone' but this run belongs to 'renamed'", err.getvalue())
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY_OWNER": "renamed"}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(br.main(self.argv()), br.EXIT_OK)  # fixtures: no owner to compare with
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t", "GITHUB_REPOSITORY_OWNER": "SOMEONE"}), \
+             mock.patch.object(br, "_open", side_effect=urllib.error.URLError("offline")), \
+             contextlib.redirect_stderr(io.StringIO()) as err, mock.patch.object(br.time, "sleep"):
+            os.environ.pop("PROFILE_FIXTURES", None)
+            self.assertEqual(br.main(["--root", str(self.root)]), br.EXIT_ERROR)  # case-insensitive match, then offline
+        self.assertIn("unreachable", err.getvalue())
+
+    def test_allow_shrink_flag_reaches_the_builder(self):
+        self.uncurated()
+        self.repos(repo("first"), repo("second"))
+        long = "# first — t\n\n" + "words " * 40 + "\n"
+        self.profile("first", long)
+        self.profile("second", long.replace("first", "second"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(br.main(self.argv()), br.EXIT_OK)
+            self.profile("first", "# first — t\n\nshort\n")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(br.main(self.argv()), br.EXIT_ERROR)
+            self.assertEqual(br.main(self.argv("--allow-shrink")), br.EXIT_OK)
 
 
 class FakeResponse:
-    def __init__(self, status, body, content_type):
+    def __init__(self, status, body, content_type, extra=None):
         self.status, self._body = status, body
         self.headers = {"Content-Type": content_type}
+        self.headers.update(extra or {})
 
     def read(self):
         return self._body
@@ -520,11 +1020,16 @@ class FakeResponse:
         return False
 
 
-def http_error(code, body=b"", retry_after=None):
-    headers = email.message.Message()
+def http_error(code, body=b"", retry_after=None, headers=None):
+    message = email.message.Message()
     if retry_after is not None:
-        headers["Retry-After"] = str(retry_after)
-    return urllib.error.HTTPError("https://api.github.com/x", code, "msg", headers, io.BytesIO(body))
+        message["Retry-After"] = str(retry_after)
+    for key, value in (headers or {}).items():
+        message[key] = str(value)
+    return urllib.error.HTTPError("https://api.github.com/x", code, "msg", message, io.BytesIO(body))
+
+
+FULL = json.dumps([repo("a", repo_id=1)]).encode()
 
 
 class GitHubClient(unittest.TestCase):
@@ -542,8 +1047,18 @@ class GitHubClient(unittest.TestCase):
             self.assertIsNone(self.client.raw_file("o/r", ".github/PROFILE.md"))
             with self.assertRaises(br.BuildError) as caught:
                 self.client.list_repos("nobody")
-        self.assertEqual(opened.call_count, 2)
+            with self.assertRaises(br.BuildError):
+                self.client.public_repo_count("nobody")
+        self.assertEqual(opened.call_count, 3)
         self.assertIn("not found", str(caught.exception))
+
+    def test_401_names_the_credential_and_does_not_retry(self):
+        with mock.patch.object(br, "_open", side_effect=http_error(401, b'{"message":"Bad credentials"}')) as opened:
+            with self.assertRaises(br.BuildError) as caught:
+                self.client.list_repos("someone")
+        self.assertEqual(opened.call_count, 1)
+        self.assertIn("GitHub API refused the credential (HTTP 401)", str(caught.exception))
+        self.assertIn("GITHUB_TOKEN", str(caught.exception))
 
     def test_403_fails_at_once_unless_a_short_retry_after_is_given(self):
         with mock.patch.object(br, "_open", side_effect=http_error(403, b"rate limited")) as opened:
@@ -555,12 +1070,52 @@ class GitHubClient(unittest.TestCase):
             self.assertEqual(self.client.raw_file("o/r", "x"), b"# t\n")
         self.assertEqual(opened.call_count, 2)
         self.sleep.assert_any_call(3)
+        with mock.patch.object(br, "_open", side_effect=http_error(429, retry_after=br.MAX_RATE_WAIT + 1)) as opened:
+            with self.assertRaises(br.BuildError):
+                self.client.raw_file("o/r", "x")
+        self.assertEqual(opened.call_count, 1)
+
+    def test_exhausted_primary_limit_waits_for_a_near_reset_and_fails_on_a_far_one(self):
+        ok = FakeResponse(200, b"# t\n", "application/vnd.github.raw+json")
+        with mock.patch.object(br.time, "time", return_value=1_000_000):
+            near = http_error(403, headers={"X-RateLimit-Remaining": 0, "X-RateLimit-Reset": 1_000_045})
+            with mock.patch.object(br, "_open", side_effect=[near, ok]):
+                self.assertEqual(self.client.raw_file("o/r", "x"), b"# t\n")
+            self.sleep.assert_any_call(46)
+            far = http_error(403, headers={"X-RateLimit-Remaining": 0, "X-RateLimit-Reset": 1_003_600})
+            with mock.patch.object(br, "_open", side_effect=far) as opened:
+                with self.assertRaises(br.BuildError) as caught:
+                    self.client.raw_file("o/r", "x")
+        self.assertEqual(opened.call_count, 1)
+        self.assertIn("rate limit exhausted", str(caught.exception))
+        self.assertIn("1970-01-12T14:46:40Z", str(caught.exception))
+
+    def test_rate_limit_headers_are_remembered_from_the_last_response(self):
+        first = FakeResponse(200, FULL, "application/json",
+                             {"X-RateLimit-Limit": "5000", "X-RateLimit-Remaining": "4999", "X-RateLimit-Used": "1",
+                              "X-RateLimit-Reset": "1700000000", "X-RateLimit-Resource": "core"})
+        second = FakeResponse(200, b'{"public_repos": 1}', "application/json",
+                              {"X-RateLimit-Limit": "5000", "X-RateLimit-Remaining": "4998", "X-RateLimit-Used": "2",
+                               "X-RateLimit-Reset": "1700000000", "X-RateLimit-Resource": "core"})
+        with mock.patch.object(br, "_open", side_effect=[first, second]):
+            self.client.list_repos("someone")
+            self.assertEqual(self.client.public_repo_count("someone"), 1)
+        self.assertEqual(self.client.rate_limit["remaining"], "4998")
+        self.assertEqual(self.client.requests, 2)
+        self.assertEqual(self.client.describe()["kind"], "github")
 
     def test_5xx_is_retried_three_times_then_fails(self):
         with mock.patch.object(br, "_open", side_effect=http_error(503)) as opened:
             with self.assertRaises(br.BuildError):
                 self.client.get_repo("o/r")
         self.assertEqual(opened.call_count, 3)
+
+    def test_network_errors_are_retried_and_named(self):
+        with mock.patch.object(br, "_open", side_effect=TimeoutError("timed out")) as opened:
+            with self.assertRaises(br.BuildError) as caught:
+                self.client.get_repo("o/r")
+        self.assertEqual(opened.call_count, 3)
+        self.assertIn("GitHub API unreachable", str(caught.exception))
 
     def test_a_directory_at_the_profile_path_is_an_error_not_a_body(self):
         listing = FakeResponse(200, b'[{"name": "PROFILE.md"}]', "application/json; charset=utf-8")
@@ -569,26 +1124,53 @@ class GitHubClient(unittest.TestCase):
                 self.client.raw_file("o/r", ".github")
         self.assertIn("not a regular file", str(caught.exception))
 
-    def test_non_list_listing_is_an_error(self):
+    def test_non_list_listing_and_non_object_account_are_errors(self):
         with mock.patch.object(br, "_open", return_value=FakeResponse(200, b'{"message": "odd"}', "application/json")):
             with self.assertRaises(br.BuildError):
                 self.client.list_repos("someone")
+        with mock.patch.object(br, "_open", return_value=FakeResponse(200, b'[1]', "application/json")):
+            with self.assertRaises(br.BuildError):
+                self.client.public_repo_count("someone")
+        with mock.patch.object(br, "_open", return_value=FakeResponse(200, b'{"login": "someone"}', "application/json")):
+            with self.assertRaises(br.BuildError) as caught:
+                self.client.public_repo_count("someone")
+        self.assertIn("'public_repos' is missing", str(caught.exception))
 
-    def test_authorization_header_is_sent_and_pagination_follows_next(self):
-        page1 = FakeResponse(200, json.dumps([{"id": 1, "name": "a"}]).encode(), "application/json")
+    def test_headers_are_sent_and_pagination_follows_next_and_dedupes(self):
+        page1 = FakeResponse(200, json.dumps([repo("a", repo_id=1)]).encode(), "application/json")
         page1.headers["Link"] = '<https://api.github.com/user/1/repos?page=2>; rel="next", <https://api.github.com/user/1/repos?page=2>; rel="last"'
-        page2 = FakeResponse(200, json.dumps([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]).encode(), "application/json")
+        page2 = FakeResponse(200, json.dumps([repo("a", repo_id=1), repo("b", repo_id=2)]).encode(), "application/json")
         with mock.patch.object(br, "_open", side_effect=[page1, page2]) as opened:
             repos = self.client.list_repos("someone")
         self.assertEqual([r["name"] for r in repos], ["a", "b"])  # the duplicate id is dropped
         first_request = opened.call_args_list[0].args[0]
         self.assertEqual(first_request.get_header("Authorization"), "Bearer token")
+        self.assertEqual(first_request.get_header("X-github-api-version"), "2022-11-28")
+        self.assertEqual(first_request.get_header("User-agent"), br.USER_AGENT)
+        self.assertIn("per_page=100", first_request.full_url)
         self.assertEqual(opened.call_args_list[1].args[0].full_url, "https://api.github.com/user/1/repos?page=2")
+
+    def test_verbose_log_names_url_and_status_and_never_the_token(self):
+        lines = []
+        client = br.GitHub("s3cret", verbose=True, log=lines.append)
+        with mock.patch.object(br, "_open", side_effect=[FakeResponse(200, FULL, "application/json"), http_error(404)]):
+            client.list_repos("someone")
+            client.raw_file("o/r", "x")
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("GET https://api.github.com/users/someone/repos?") and lines[0].endswith("-> 200"))
+        self.assertTrue(lines[1].endswith("-> 404"))
+        self.assertNotIn("s3cret", "".join(lines))
 
     def test_redirect_off_the_api_host_is_refused(self):
         handler = br._StayOnApiHost()
         with self.assertRaises(br.BuildError):
             handler.redirect_request(mock.Mock(), None, 302, "", {}, "https://evil.example/x")
+
+    def test_listing_entries_are_validated_at_the_client(self):
+        with mock.patch.object(br, "_open", return_value=FakeResponse(200, b'[{"id": 1, "name": "a"}]', "application/json")):
+            with self.assertRaises(br.BuildError) as caught:
+                self.client.list_repos("someone")
+        self.assertIn("'full_name' is missing", str(caught.exception))
 
 
 class Helpers(unittest.TestCase):
@@ -616,8 +1198,9 @@ class Helpers(unittest.TestCase):
         self.assertIsNone(br.pick_release([]))
         self.assertIsNone(br.pick_release([{"tag_name": "v1", "prerelease": True}]))
         self.assertEqual(br.pick_release({"tag_name": "v1"})["tag_name"], "v1")
-        self.assertEqual(br.pick_release([{"tag_name": "a", "published_at": "2026-01-01T00:00:00Z"},
-                                          {"tag_name": "b", "published_at": "2026-01-01T00:00:00Z"}])["tag_name"], "a")
+        tied = [{"tag_name": "a", "published_at": "2026-01-01T00:00:00Z"}, {"tag_name": "b", "published_at": "2026-01-01T00:00:00Z"}]
+        self.assertEqual(br.pick_release(tied)["tag_name"], "b")
+        self.assertEqual(br.pick_release(tied[::-1])["tag_name"], "b")  # the order listed does not decide
         self.assertEqual(br.pick_release([{"tag_name": "undated"},
                                           {"tag_name": "dated", "published_at": "2026-01-01T00:00:00Z"}])["tag_name"], "dated")
 
@@ -627,6 +1210,23 @@ class Helpers(unittest.TestCase):
         self.assertEqual(br.substitute("{{{version}}}", values), "{{version}}")
         self.assertEqual(br.substitute("{{ version }}", values), "{{ version }}")
         self.assertEqual(br.substitute("{version}}", values), "v1}")
+
+    def test_substitute_uses_a_function_so_values_are_never_backreferences(self):
+        self.assertEqual(br.substitute("{version} / {name}", {"version": "$1 \\1 \\g<0> $&", "name": "\\"}),
+                         "$1 \\1 \\g<0> $& / \\")
+
+    def test_utc_now_accepts_epoch_and_iso_and_rejects_the_rest(self):
+        with mock.patch.dict(os.environ, {"NOW": "0"}):
+            self.assertEqual(br.utc_now(), "1970-01-01T00:00:00Z")
+        with mock.patch.dict(os.environ, {"NOW": "2026-09-21T17:30:00+05:30"}):
+            self.assertEqual(br.utc_now(), "2026-09-21T12:00:00Z")
+        with mock.patch.dict(os.environ, {"NOW": "2026-09-21T12:00:00.250Z"}):
+            self.assertEqual(br.utc_now(), "2026-09-21T12:00:00Z")
+        for bad in ("soon", "2026-09-21T12:00:00", "2026-13-01T00:00:00Z"):
+            with mock.patch.dict(os.environ, {"NOW": bad}), self.assertRaises(br.BuildError):
+                br.utc_now()
+        with mock.patch.dict(os.environ, {"NOW": ""}):
+            self.assertRegex(br.utc_now(), r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
 if __name__ == "__main__":
