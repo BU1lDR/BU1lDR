@@ -1,42 +1,59 @@
-# Rebuilds the Work section of README.md from the repositories it describes, and
-# commits the result when -- and only when -- it changed.
+# Rebuilds the Work section of README.md from the repositories it describes, commits
+# the result when it changed, and commits a run record (meta/last-run.json) every time.
 #
 # Four ways in. Every hour, because a repository can gain a release, a description
-# or a PROFILE.md edit with nothing here to notice. By hand, from the Actions tab.
-# On a repository_dispatch of type "project-updated", which a project repository
-# can send from its own workflow the moment it pushes (see docs/notify-profile.yml;
-# it needs a token the project repository's own GITHUB_TOKEN cannot supply, so it
-# is opt-in). And on a push to main that touches the builder, its tests, its
-# config, a snippet, the README, or this file, so a change here is applied at once.
+# or a PROFILE.md edit with nothing here to notice. By hand, from the Actions tab,
+# with a dry-run switch that shows the result instead of committing it. On a
+# repository_dispatch of type "project-updated", which a project repository can send
+# from its own workflow the moment it pushes (see docs/notify-profile.yml; it needs a
+# token the project repository's own GITHUB_TOKEN cannot supply, so it is opt-in).
+# And on a push to main that touches the builder, its tests, its config, a snippet,
+# the README, or this file, so a change here is applied at once.
 #
 # The bot's own commit does not start another run: pushes made with GITHUB_TOKEN do
-# not trigger workflows, and a second run would find nothing to change anyway. A
-# human edit inside the markers is overwritten on the next run -- that is the
-# contract, and the generated block says so in its first line.
+# not trigger workflows (no push run, no Pages build), which is the loop guard. Do
+# not add `if: github.actor != 'github-actions[bot]'` -- with a PAT the actor would be
+# the human and it would pass every time. A human edit inside the markers is
+# overwritten on the next run; that is the contract, and the block says so.
 #
-# The unit tests run first, on the same interpreter, so a builder that has stopped
-# doing what its docstring says cannot rewrite the README with confidence.
+# The unit tests run first, on the same interpreter, offline (a stray network call
+# fails against a black-holed proxy), so a builder that has stopped doing what its
+# docstring says cannot rewrite the README with confidence.
 #
 # The builder exits 2 and leaves README.md alone on anything other than a clean
-# answer from the API, so an outage or a rate limit turns this run red rather than
-# committing a Work section with a repository quietly missing from it. GitHub emails
-# a red scheduled run to whoever last edited the cron line below; nothing is retried
-# until the next hour. Warnings the builder raises (a repository rendered from its
-# bare description, a curated name that no longer matches) appear as annotations
-# and in the run's summary, not in email -- open the run when a project changes.
+# answer from the API -- see WHAT IS A FAILURE in tools/build_readme.py -- so an
+# outage, a rate limit or a schema change turns this run red rather than committing
+# a Work section with a repository quietly missing from it. A red run opens or
+# updates an issue in this repository (email for scheduled runs goes only to whoever
+# last touched the cron line, which is not a place anyone reads).
 #
-# GitHub disables the schedule in a public repository after 60 days without
-# "repository activity", which it does not define, and does not say so anywhere a
-# person would look. The last step makes an empty commit when nothing has been
-# committed for 50 days, on green runs and red ones alike -- a builder that is red
-# for two months is exactly when the schedule and its emails must stay alive.
+# Anti-decay. GitHub disables the schedule in a public repository after 60 days
+# without a commit; the run record is committed every hour, so that never comes.
+# The last step pings an external monitor when the HEALTHCHECK_URL secret is set --
+# the one signal that survives this workflow not running at all. To set it up: make
+# a check at healthchecks.io (or cronitor.io) with a period of 1 hour and a grace of
+# 2 hours, copy its ping URL, then `gh secret set HEALTHCHECK_URL -R <owner>/<owner>`.
+# Until then the step prints a notice and does nothing.
 
 name: Update README
 
 on:
   schedule:
+    # Every hour at :23 UTC. India keeps no daylight saving, so that is :53 past
+    # every hour IST (UTC+5:30) the whole year; nothing here dedupes by day, so the
+    # repeated autumn hour elsewhere is irrelevant. Quoted: a bare leading * is a
+    # YAML alias.
     - cron: '23 * * * *'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Rebuild and show the result in the run summary and an artifact; do not commit or push
+        type: boolean
+        default: false
+      allow_shrink:
+        description: Accept a Work section more than 20% smaller with no repository removed
+        type: boolean
+        default: false
   repository_dispatch:
     types: [project-updated]
   push:
@@ -49,17 +66,24 @@ on:
       - 'README.md'
       - '.github/workflows/update-readme.yml'
 
-# The repository default is read; this job has to write README.md back.
+# The repository default is read; the build job has to write README.md back, and
+# nothing else. The report job below narrows itself to issues: write.
 permissions:
   contents: write
 
-# Two triggers close together (the hourly tick and a dispatch) must not push over
-# each other. At most one run waits; a third trigger replaces the waiting one. The
-# running one is never cancelled, since it may be mid-push. The waiting run checks
-# out main as of when it starts (see `ref` below), so it sees the earlier commit.
+# One run at a time and one waiting. queue: single (the default) is the right one:
+# every run rebuilds the whole block from the API, so a waiting run that a newer
+# trigger replaces loses nothing -- queue: max would only stack up identical work.
+# The running one is never cancelled, since it may be mid-push. The waiting run
+# checks out main as of when it starts (see `ref` below), so it sees the earlier
+# commit.
 concurrency:
-  group: update-readme
+  group: ${{ github.workflow }}
   cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash   # -eo pipefail: a failing builder cannot hide behind a pipe
 
 jobs:
   build:
@@ -67,36 +91,101 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The branch, not the event's SHA: a run that queued behind another would
           # otherwise rebuild on the commit before that run's push and be rejected.
           ref: main
+          # persist-credentials stays at its default (true): the commit step pushes
+          # with this credential. Nothing here installs anything that could read it.
 
       - name: The builder still does what its docstring says
+        env:
+          HTTPS_PROXY: http://127.0.0.1:1   # the tests are offline; a stray request fails loudly
+          HTTP_PROXY: http://127.0.0.1:1
         run: python3 -m unittest discover -s tests -t .
 
       - name: Rebuild from the repositories
+        id: build
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 tools/build_readme.py --summary-file "$RUNNER_TEMP/summary.md"
+          ALLOW_SHRINK: ${{ inputs.allow_shrink }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          flags=(--summary-file "$RUNNER_TEMP/summary.md" --meta-file meta/last-run.json)
+          if [ "$ALLOW_SHRINK" = "true" ]; then flags+=(--allow-shrink); fi
+          if [ "$DRY_RUN" = "true" ]; then flags+=(--verbose); fi
+          python3 tools/build_readme.py "${flags[@]}"
+
+      - name: Show the result instead of committing it (dry run)
+        if: inputs.dry_run == true
+        run: |
+          {
+            echo '### Dry run: the Work section as it would be committed'
+            echo
+            echo '````markdown'
+            python3 - <<'PY'
+          import json
+          config = json.load(open("profile.config.json", encoding="utf-8"))
+          start, end = config.get("markers", ["<!-- work:start -->", "<!-- work:end -->"])
+          text = open("README.md", encoding="utf-8").read()
+          first, last = text.find(start), text.find(end)
+          print(text[first:last + len(end)] if first >= 0 and last >= 0 else "(markers not found)")
+          PY
+            echo '````'
+            echo
+            echo '```'
+            git --no-pager diff --stat -- README.md meta/last-run.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the rebuilt README (dry run)
+        if: inputs.dry_run == true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: readme-dry-run
+          path: |
+            README.md
+            meta/last-run.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Commit if anything changed
+        # Runs after a failed build too: README.md is untouched by contract, and the
+        # run record says what went wrong, which is what the weekly audit reads.
+        if: ${{ !cancelled() && inputs.dry_run != true }}
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          ALLOW_SHRINK: ${{ inputs.allow_shrink }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
+          rebuild() {
+            flags=(--summary-file "$RUNNER_TEMP/summary.md" --meta-file meta/last-run.json)
+            if [ "$ALLOW_SHRINK" = "true" ]; then flags+=(--allow-shrink); fi
+            python3 tools/build_readme.py "${flags[@]}"
+          }
+          commit() {
+            # These two paths and nothing else: never `git add .`, which would sweep
+            # up anything a step left behind.
+            git add -- README.md meta/last-run.json
+            if [ "$BUILD_OUTCOME" = "success" ] && [ -f "$RUNNER_TEMP/summary.md" ]; then
+              git commit -q -F "$RUNNER_TEMP/summary.md"
+            else
+              git commit -q -m "Record a failed README rebuild" \
+                -m "The builder exited non-zero and left README.md as it was. meta/last-run.json holds the error; the run log has the detail."
+            fi
+          }
+
           for attempt in 1 2 3; do
-            if git diff --quiet -- README.md; then
-              echo "README.md already matches the repositories."
+            if git diff --quiet -- README.md meta/last-run.json && [ -z "$(git status --porcelain -- meta/last-run.json)" ]; then
+              echo "Nothing to commit: README.md and meta/last-run.json already match."
               exit 0
             fi
-            git add README.md
-            git commit -F "$RUNNER_TEMP/summary.md"
+            commit
             before=$(git rev-parse origin/main)
-            if git push; then
+            if git push origin HEAD:main; then
               exit 0
             fi
             git fetch origin main
@@ -108,28 +197,84 @@ jobs:
             # Someone pushed to main while this ran. Do not rebase a generated file:
             # start again from their commit and let the builder decide what changed.
             echo "push rejected; rebuilding on the new head (attempt $((attempt + 1)) of 3)"
+            cp meta/last-run.json "$RUNNER_TEMP/last-run.json"
             git reset --hard origin/main
-            python3 tools/build_readme.py --summary-file "$RUNNER_TEMP/summary.md"
+            if [ "$BUILD_OUTCOME" = "success" ]; then
+              rebuild
+            else
+              cp "$RUNNER_TEMP/last-run.json" meta/last-run.json   # the failed run's record, on the new head
+            fi
           done
           echo "::error::gave up after three rejected pushes" >&2
           exit 1
 
-      - name: Keep the schedule alive
-        if: always()
+      - name: Tell the external monitor how this run ended
+        # Last step, on purpose: it reports the whole job. A failed ping is a warning,
+        # not a red run -- the monitor itself alarms on a missed heartbeat.
+        if: ${{ always() && inputs.dry_run != true }}
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+          JOB_STATUS: ${{ job.status }}
         run: |
-          git fetch origin main
-          git reset --hard origin/main
-          last=$(git log -1 --format=%ct)
-          cutoff=$(date -d '50 days ago' +%s)
-          if [ "$last" -ge "$cutoff" ]; then
-            echo "Last commit is recent enough; no keepalive needed."
+          if [ -z "$HEALTHCHECK_URL" ]; then
+            echo "::notice::HEALTHCHECK_URL is not set; no external monitor is pinged. See the header of this workflow."
             exit 0
           fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit --allow-empty \
-            -m "Keep the hourly README check alive" \
-            -m "GitHub disables scheduled workflows in a public repository after 60 days without a commit. Nothing in the README changed; this commit exists so the schedule that checks it keeps running."
-          git push || echo "::warning::keepalive push rejected (main moved); the next hourly run will retry"
+          url="$HEALTHCHECK_URL"
+          if [ "$JOB_STATUS" != "success" ]; then url="${HEALTHCHECK_URL%/}/fail"; fi
+          if curl -fsS -m 10 --retry 3 -o /dev/null -A "update-readme/$GITHUB_REPOSITORY" "$url"; then
+            echo "Monitor pinged ($JOB_STATUS)."
+          else
+            echo "::warning::the monitor ping failed; the monitor will raise a missed-heartbeat alarm on its own"
+          fi
+
+  report:
+    name: open or update the failure issue
+    needs: build
+    if: ${{ failure() && inputs.dry_run != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          title="Update README is failing"
+          body="Run: $RUN_URL (event: $EVENT).
+
+          README.md was left as it was. Open the run for the error; meta/last-run.json on main has it too once the run record is committed.
+
+          This issue is updated by every failed run and closed by the next successful one."
+          number=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+                     --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n1)
+          if [ -n "$number" ]; then
+            gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "$body"
+            echo "Updated issue #$number."
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
+
+  recovered:
+    name: close the failure issue
+    needs: build
+    if: ${{ success() && inputs.dry_run != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Update README is failing"
+          gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+            --json number,title --jq ".[] | select(.title == \"$title\") | .number" \
+          | while read -r number; do
+              [ -n "$number" ] || continue
+              gh issue close "$number" -R "$GITHUB_REPOSITORY" --comment "Recovered: $RUN_URL succeeded."
+              echo "Closed issue #$number."
+            done
