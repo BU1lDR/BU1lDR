@@ -1,6 +1,10 @@
-# The builder writes README.md with LF and refuses to touch a CRLF copy, so the
-# checkout must not hand it one. Pinned here rather than left to core.autocrlf.
-*.md   text eol=lf
-*.py   text eol=lf
-*.yml  text eol=lf
-*.json text eol=lf
+# Every text file is LF in the working tree, whatever core.autocrlf says: the builder
+# writes README.md with LF and refuses to touch a CRLF copy, and the scripts run under
+# bash. Pinned here rather than left to the checkout machine.
+*       text=auto eol=lf
+*.md    text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.sh    text eol=lf

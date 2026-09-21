@@ -14,8 +14,11 @@
        {live}         the repository's homepage URL (error if the repository has none)
        {description}  the repository description
        {name} {url}   the repository's name and URL
-     Write {{version}} for a literal "{version}". Do not put a test count or any other
-     figure another file already owns here unless this repository's CI checks it. -->
+     Write {{version}} for a literal "{version}". {version}, {license} and
+     {description} are rendered as plain text -- HTML shows as text, Markdown
+     punctuation is escaped -- so do not wrap them in backticks. Do not put a test
+     count or any other figure another file already owns here unless this
+     repository's CI checks it. -->
 
 # Display name — what it is, in one clause
 
