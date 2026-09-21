@@ -792,13 +792,32 @@ class ShrinkGuard(Harness):
         code, _, _ = self.run_build()
         self.assertEqual(code, 0)
 
-    def test_a_collapsed_source_with_nothing_removed_is_refused_unless_allowed(self):
+    def test_trimming_one_blurb_warns_and_still_writes(self):
+        """The edit the max_blurb_chars warning actively asks for. It is a large
+        proportion of a small block -- one section of two here -- and refusing it would
+        leave the README stale and the hourly run red until someone dispatched
+        allow_shrink by hand. Every section is still present and non-empty, and the
+        cases where a source really has collapsed are each refused by name elsewhere,
+        so this one is reported and written."""
         self.two_sections()
         self.profile("first", "# first — t\n\nshort\n")
-        self.assert_refused("would shrink from")
+        code, out, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("would shrink from", out)
+        self.assertIn("taken as an edit", out)
+        self.assertIn("\n\nshort\n", readme)
+        self.assertEqual(sorted(self.sections(readme)), ["first", "second"])
+
+    def test_a_block_that_keeps_under_a_quarter_of_itself_is_refused_unless_allowed(self):
+        self.two_sections()
+        self.profile("first", "# first — t\n\nshort\n")
+        self.profile("second", "# second — t\n\nshort\n")
+        self.assert_refused("too much to be an edit")
         code, out, readme = self.run_build(allow_shrink=True)
         self.assertEqual(code, 0)
         self.assertIn("allowed by --allow-shrink", out)
+        self.assertLess(self.report["block_bytes"],
+                        br.SHRINK_FLOOR * self.report["block_bytes_before"])
         self.assertIn("\n\nshort\n", readme)
 
     def test_a_shrink_explained_by_a_verified_removal_is_fine(self):
@@ -848,6 +867,21 @@ class Lifecycle(Harness):
         self.assertNotIn("same: changed", summary)
         self.assertTrue(summary.startswith("Rebuild README from repository state\n"))
         self.assertIn("Sources:\n", summary)
+
+    def test_an_unchanged_rebuild_does_not_claim_to_have_rebuilt_anything(self):
+        """The workflow commits this file as its message. It commits the run record on
+        every run, changed or not, to keep the schedule alive, so the subject of a
+        record-only commit must not read as a README change in git log."""
+        self.uncurated()
+        self.repos(repo("first", description="a"))
+        self.run_build()
+        self.assertTrue(self.summary().startswith("Rebuild README from repository state\n"))
+        code, out, _ = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("nothing to write", out)
+        summary = self.summary()
+        self.assertTrue(summary.startswith("Record an unchanged README rebuild\n"), summary)
+        self.assertIn("No section changed.", summary)
 
     def test_order_change_is_named_even_alongside_an_addition(self):
         self.config({"login": LOGIN, "order": ["a", "b"], "markers": [START, END]})
@@ -1111,12 +1145,15 @@ class Main(Harness):
     def test_allow_shrink_flag_reaches_the_builder(self):
         self.uncurated()
         self.repos(repo("first"), repo("second"))
-        long = "# first — t\n\n" + "words " * 40 + "\n"
+        # Long enough that trimming both blurbs to one word clears SHRINK_FLOOR, which
+        # is what --allow-shrink is for; a smaller edit only warns.
+        long = "# first — t\n\n" + "words " * 200 + "\n"
         self.profile("first", long)
         self.profile("second", long.replace("first", "second"))
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(br.main(self.argv()), br.EXIT_OK)
             self.profile("first", "# first — t\n\nshort\n")
+            self.profile("second", "# second — t\n\nshort\n")
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(br.main(self.argv()), br.EXIT_ERROR)
             self.assertEqual(br.main(self.argv("--allow-shrink")), br.EXIT_OK)

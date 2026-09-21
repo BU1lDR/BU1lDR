@@ -7,7 +7,7 @@
     python3 tools/build_readme.py --summary-file PATH          # also write a commit-message-shaped summary
     python3 tools/build_readme.py --meta-file PATH             # machine-readable record of the run
     python3 tools/build_readme.py --root DIR                   # README.md and profile.config.json live here
-    python3 tools/build_readme.py --allow-shrink               # accept a Work section >20% smaller with nothing removed
+    python3 tools/build_readme.py --allow-shrink               # accept a Work section that lost most of itself
     python3 tools/build_readme.py --anonymous                  # no token: 60 requests an hour, for a look
     python3 tools/build_readme.py --verbose                    # log every request as "GET <url> -> <status>"
 
@@ -113,15 +113,17 @@ Anything else exits 2 and leaves README.md byte-identical: a 401 (the token), a 
 or 429 the run cannot wait out (the rate limit resets more than two minutes away),
 a 5xx or a network error after three attempts, a redirect off api.github.com, a
 response missing a field this tool reads or holding the wrong type in it (schema
-drift renders as an error, never as "None"), a non-UTF-8 file, a file over 64 KiB, a
+drift renders as an error, never as "None"), a non-UTF-8 file, a blurb over 8 KiB, a
 listing that returns no repositories, a listing shorter than the account's public
 repository count. So does anything that would write a README this tool could not
 read back: a section containing one of the markers or a second section mark, a
 display name containing a bracket or a backslash, a body that opens with its own
-heading, a README that would exceed 400 KiB (GitHub truncates at 500), markers
-missing, duplicated or reversed. A Work section more than 20% smaller than the one
-it replaces, with no repository removed, is refused too: a source has collapsed,
-and --allow-shrink is how a person says otherwise. A repository that would be
+heading, a README that would exceed 100 KiB (the size scripts/audit.sh fails on),
+markers missing, duplicated or reversed. A Work section that keeps every section but
+keeps less than a quarter of its bytes, with no repository removed, is refused too,
+and --allow-shrink is how a person says otherwise; between that and 20% smaller it
+warns instead, because trimming the blurbs is an edit a person does on purpose and
+the collapse cases are each caught by name above. A repository that would be
 *removed* is first looked up directly: if it still exists under the same name as a
 public, unarchived, unexcluded repository, the listing missed it and the run fails
 rather than drop the section; a rename, a deletion, an archive or an exclusion is an
@@ -169,12 +171,25 @@ NOTICE = (
 )
 EXIT_OK, EXIT_STALE, EXIT_ERROR = 0, 1, 2
 
-MAX_BLURB_BYTES = 64 * 1024
-MAX_README_BYTES = 400 * 1024
+MAX_BLURB_BYTES = 8 * 1024    # a blurb is a paragraph or two; 1400 chars is the soft limit
+MAX_README_BYTES = 100 * 1024  # the same ceiling scripts/audit.sh fails on, so the two agree
 REQUEST_TIMEOUT = 20      # seconds, per request
 ATTEMPTS = 3              # for 5xx and network errors
 MAX_RATE_WAIT = 120       # seconds this run will sleep for a rate limit before giving up
-SHRINK_FLOOR = 0.8        # a new block smaller than this fraction of the old one needs a removal or --allow-shrink
+
+# Two thresholds, not one, because "a source collapsed" and "the owner trimmed the prose"
+# look identical to a byte count and must not share a verdict. The collapse cases are
+# caught precisely elsewhere and by name: a curated repository whose PROFILE.md has gone
+# is a hard error, an empty one is treated as absent, a listing shorter than the account's
+# own repo count is refused, and every API field is shape-checked. What is left for a
+# proportion to judge is only the ambiguous middle, so it warns rather than refuses --
+# a deliberate brevity pass across the blurbs (which the max_blurb_chars warning actively
+# asks for) legitimately halves this block, and refusing it would wedge the hourly run red
+# until someone dispatched allow_shrink by hand. Below SHRINK_FLOOR the block has lost
+# three quarters of itself with every section still present and non-empty, which no edit
+# does by accident.
+SHRINK_WARN = 0.8         # smaller than this fraction of the old block: say so
+SHRINK_FLOOR = 0.25       # smaller than this: refuse unless a repository was removed or --allow-shrink
 
 TITLE_SEP = " — "
 TITLE_SEP_ASCII = " -- "
@@ -668,7 +683,7 @@ def normalise_blurb(raw: bytes, where: str) -> str:
     the file. Done once here so the API path and the fixture path agree."""
     if len(raw) > MAX_BLURB_BYTES:
         raise BuildError(f"{where} is {len(raw):,} bytes; the limit is {MAX_BLURB_BYTES:,} "
-                         "(GitHub truncates a README at 500 KiB)")
+                         "-- a blurb is a paragraph or two, not a document")
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as error:
@@ -1066,7 +1081,7 @@ def build(root: Path, source, check: bool, summary_file: Path | None, out=None, 
     report["readme_bytes"] = len(updated.encode("utf-8"))
     if report["readme_bytes"] > MAX_README_BYTES:
         raise BuildError(f"the rebuilt README would be {report['readme_bytes']:,} bytes; "
-                         f"the limit is {MAX_README_BYTES:,} (GitHub truncates at 500 KiB)")
+                         f"the limit is {MAX_README_BYTES:,}, the size scripts/audit.sh fails on")
     changes = describe_change(old_inner, inner, login)
 
     listed_ids = {repo["id"] for repo in listed}
@@ -1109,13 +1124,17 @@ def build(root: Path, source, check: bool, summary_file: Path | None, out=None, 
     before_bytes, after_bytes = report["block_bytes_before"], report["block_bytes"]
     removed_any = any(line.endswith(": removed") for line in changes)
     generated_before = bool(sections_by_repo(old_inner, login))
-    if generated_before and after_bytes < SHRINK_FLOOR * before_bytes and not removed_any:
+    if generated_before and after_bytes < SHRINK_WARN * before_bytes and not removed_any:
         message = (f"the Work section would shrink from {before_bytes:,} to {after_bytes:,} bytes "
                    f"({100 - 100 * after_bytes // before_bytes}% smaller) with no repository removed")
-        if not allow_shrink:
-            raise BuildError(message + "; a source has collapsed. If this is intended, run with "
-                             "--allow-shrink (the workflow_dispatch input allow_shrink)")
-        warn(message + "; allowed by --allow-shrink")
+        if after_bytes >= SHRINK_FLOOR * before_bytes:
+            warn(message + "; every section is still present, so this is being taken as an edit "
+                 "rather than a collapse -- look at the page")
+        elif allow_shrink:
+            warn(message + "; allowed by --allow-shrink")
+        else:
+            raise BuildError(message + "; that is too much to be an edit. If it is intended, run "
+                             "with --allow-shrink (the workflow_dispatch input allow_shrink)")
 
     if updated != readme and not changes:
         changes = ["block: notice, stamp or spacing restored"]
@@ -1144,7 +1163,8 @@ def _write_summary(path: Path | None, changes: list[str], provenance: list[str],
     """A commit message: subject, the per-repository change list, where each section
     came from, and any warnings. Written even when nothing changed, so a caller can
     read it. The same text goes to the Actions step summary, where a human looks."""
-    lines = ["Rebuild README from repository state", ""]
+    lines = ["Rebuild README from repository state" if changes
+             else "Record an unchanged README rebuild", ""]
     lines += changes or ["No section changed."]
     lines += ["", "Sources:"] + [f"  {p}" for p in provenance]
     if warnings:
