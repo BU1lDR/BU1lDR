@@ -30,6 +30,7 @@ UA="profile-readme-audit (+https://github.com/$REPO)"
 failures=0
 warnings=0
 ok()   { printf 'ok    %s\n' "$*"; }
+info() { printf 'info  %s\n' "$*"; }   # could not be checked from here; not counted
 warn() { printf 'warn  %s\n' "$*"; warnings=$((warnings + 1)); }
 bad()  { printf 'FAIL  %s\n' "$*"; failures=$((failures + 1)); }
 
@@ -237,7 +238,7 @@ fi
 referenced=$(grep -rhoE 'secrets\.[A-Za-z0-9_]+' .github/workflows/ | sed 's/^secrets\.//' | sort -u || true)
 have=$(gh api "repos/$REPO/actions/secrets" --jq '.secrets[].name' 2>/dev/null | sort -u) || have="__unreadable__"
 if [ "$have" = "__unreadable__" ]; then
-  warn "cannot list this repository's secrets with this token (GITHUB_TOKEN cannot); run scripts/audit.sh locally for the inventory"
+  info "secrets cannot be listed with this token (GITHUB_TOKEN never can); run scripts/audit.sh locally for the inventory"
 else
   for name in $referenced; do
     if printf '%s\n' "$have" | grep -qx "$name"; then
@@ -261,6 +262,8 @@ done
 perm=$(gh api "repos/$REPO/actions/permissions/workflow" --jq .default_workflow_permissions 2>/dev/null) || perm="unreadable"
 if [ "$perm" = "read" ]; then
   ok "default GITHUB_TOKEN permissions are read-only; the workflow asks for contents: write itself"
+elif [ "$perm" = "unreadable" ]; then
+  info "default GITHUB_TOKEN permissions need an admin token to read; run scripts/audit.sh locally to check them"
 else
   warn "default GITHUB_TOKEN permissions are '$perm'; set them to read in Settings > Actions > General"
 fi
