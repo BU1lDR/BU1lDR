@@ -1,5 +1,6 @@
 <!-- Copy this file to .github/PROFILE.md in a repository and fill it in. The profile
-     README at github.com/BU1lDR renders it within the hour (tools/build_readme.py in
+     README at github.com/BU1lDR renders it on its next run -- within a minute or two of a
+     push here, and once a day regardless (tools/build_readme.py in
      BU1lDR/BU1lDR). Leading HTML comments like this one are ignored.
 
      Shape -- keep it: one heading line, one meta row, at most two short paragraphs.

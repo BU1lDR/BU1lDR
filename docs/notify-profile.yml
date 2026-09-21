@@ -1,6 +1,6 @@
 # Opt-in: make a project repository tell the profile the moment it changes.
 #
-# Without this, the profile catches up on the hour. With it, a push to main or a
+# Without this, the profile catches up on its own schedule. With it, a push to main or a
 # published release here sends the profile repository a repository_dispatch and the README
 # rebuilds within a minute or two.
 #
@@ -12,7 +12,7 @@
 #      profile repository). Permissions: Contents = Read and write (the dispatch
 #      endpoint requires it). Nothing else. Expiration: "No expiration" is allowed
 #      for a personal account and is what this token has; an expiring token turns
-#      into a silent fall-back to the hourly schedule on the day it expires. GitHub
+#      into a silent fall-back to the profile's own schedule on the day it expires. GitHub
 #      revokes any token unused for a year regardless -- pushes here count as use.
 #   2. Store it in each project repository as a secret named PROFILE_DISPATCH_TOKEN,
 #      or run docs/install-dispatch-secret.sh from the profile repository, which
@@ -28,7 +28,7 @@
 # expired (401), scoped to the wrong repository (404), missing Contents: write
 # (403) -- gh's own message is reported as a warning annotation on the run, not a
 # red job: this repository's CI must not go red over something that is not about
-# this repository. The hourly schedule on the profile covers the gap either way.
+# this repository. The profile's own schedule covers the gap either way.
 
 name: Notify profile
 
@@ -61,5 +61,5 @@ jobs:
                2> "$RUNNER_TEMP/gh.err"; then
             echo "Profile notified."
           else
-            echo "::warning::profile dispatch failed: $(tr -d '\n' < "$RUNNER_TEMP/gh.err") -- the profile's hourly run will catch up."
+            echo "::warning::profile dispatch failed: $(tr -d '\n' < "$RUNNER_TEMP/gh.err") -- the profile's next scheduled run will catch up."
           fi

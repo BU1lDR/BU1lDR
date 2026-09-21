@@ -73,11 +73,11 @@ WHAT EACH REPOSITORY CONTROLS
     snippets/<name>.md      same format, kept in THIS repository; used only when the
                             repository has no .github/PROFILE.md
     (neither)               "### [<name>](<url>)" with the GitHub description as body,
-                            so a new project appears the hour it is created -- with a
-                            ::warning:: annotation on the run and in its summary. For a
-                            repository named in the config's "order" list this is an
-                            error instead: a curated section that has lost its source
-                            must not quietly shrink to one line.
+                            so a new project appears on the next run after it is created -- with
+                            a ::warning:: annotation on the run and in its summary. For a
+                            repository named in the config's "order" list this is an error
+                            instead: a curated section that has lost its source must not quietly
+                            shrink to one line.
 
 Each generated section opens with an invisible "<!-- repo: <name> -->" line, which is
 how the block is split back into sections on the next run without guessing from
@@ -185,7 +185,7 @@ MAX_RATE_WAIT = 120       # seconds this run will sleep for a rate limit before 
 # own repo count is refused, and every API field is shape-checked. What is left for a
 # proportion to judge is only the ambiguous middle, so it warns rather than refuses --
 # a deliberate brevity pass across the blurbs (which the max_blurb_chars warning actively
-# asks for) legitimately halves this block, and refusing it would wedge the hourly run red
+# asks for) legitimately halves this block, and refusing it would wedge the scheduled run red
 # until someone dispatched allow_shrink by hand. Below SHRINK_FLOOR the block has lost
 # three quarters of itself with every section still present and non-empty, which no edit
 # does by accident.

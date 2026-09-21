@@ -1,4 +1,4 @@
-# Weekly audit of the README automation: is the hourly workflow alive, did it run
+# Weekly audit of the README automation: is the daily workflow alive, did it run
 # lately, is the README the shape the builder writes, do its links answer, are the
 # actions pinned, is the dispatch hook in the project repositories still delivering.
 # scripts/audit.sh has the checks; this only runs it and routes a failure to an

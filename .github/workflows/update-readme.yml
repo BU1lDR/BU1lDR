@@ -1,12 +1,17 @@
 # Rebuilds the Work section of README.md from the repositories it describes, commits
 # the result when it changed, and commits a run record (meta/last-run.json) every time.
 #
-# Four ways in. Every hour, because a repository can gain a release, a description
-# or a PROFILE.md edit with nothing here to notice. By hand, from the Actions tab,
+# Four ways in. Once a day, because a description or a homepage edit, a new or renamed
+# repository, or a push from a repository whose dispatch hook is missing or no longer
+# delivering, has nothing else here to notice it -- and because the record each run
+# commits is what keeps GitHub from disabling the schedule. By hand, from the Actions tab,
 # with a dry-run switch that shows the result instead of committing it. On a
 # repository_dispatch of type "project-updated", which a project repository can send
 # from its own workflow the moment it pushes (see docs/notify-profile.yml; it needs a
-# token the project repository's own GITHUB_TOKEN cannot supply, so it is opt-in).
+# token the project repository's own GITHUB_TOKEN cannot supply, so it is opt-in). All
+# four project repositories have it installed, which is the difference between a push
+# showing up here in a minute and showing up a day later; the weekly audit checks that
+# each one is still delivering, because the schedule alone is now a day behind.
 # And on a push to main that touches the builder, its tests, its config, a snippet,
 # the README, or this file, so a change here is applied at once.
 #
@@ -28,25 +33,43 @@
 # last touched the cron line, which is not a place anyone reads).
 #
 # Anti-decay. GitHub disables the schedule in a public repository after 60 days
-# without a commit; the run record is committed every hour, so that never comes. That
+# without a commit; the run record is committed on every run, so a once-a-day tick on
+# its own puts about sixty commits in that window and it never comes. That
 # holds even when the build never happens: a run whose earlier step failed writes the
 # record itself (--record-failure) rather than committing nothing, which is what it
 # used to do on the one run of the day that a person most needed a record of.
 # The last step pings an external monitor when the HEALTHCHECK_URL secret is set --
 # the one signal that survives this workflow not running at all. To set it up: make
-# a check at healthchecks.io (or cronitor.io) with a period of 1 hour and a grace of
-# 2 hours, copy its ping URL, then `gh secret set HEALTHCHECK_URL -R <owner>/<owner>`.
+# a check at healthchecks.io (or cronitor.io) with a period of 1 day and a grace of
+# 1 day, copy its ping URL, then `gh secret set HEALTHCHECK_URL -R <owner>/<owner>`.
+# A day of grace and not an hour: GitHub drops a scheduled tick under load often enough
+# that the weekly audit calls one missing day a warning, so a monitor that paged on it
+# would be muted inside a month and then it is watching nothing. Two silent days is the
+# condition worth being woken for, and it is the one FRESH_LIMIT fails on too.
 # Until then the step prints a notice and does nothing.
 
 name: Update README
 
 on:
   schedule:
-    # Every hour at :23 UTC. India keeps no daylight saving, so that is :53 past
-    # every hour IST (UTC+5:30) the whole year; nothing here dedupes by day, so the
-    # repeated autumn hour elsewhere is irrelevant. Quoted: a bare leading * is a
-    # YAML alias.
-    - cron: '23 * * * *'
+    # Once a day at 17:23 UTC, which is 22:53 IST all year (India keeps no daylight
+    # saving), so a red run and the issue it opens land while the owner is awake -- which
+    # matters more now that the next unattended attempt is a day out rather than an hour.
+    #
+    # The hour is not free. The weekly audit runs Mondays at 06:41 UTC and judges this
+    # schedule from the age of its newest run, so this tick sits 13h18m before it. A cron
+    # never fires early, only late, so lateness only makes that age smaller; the age jumps
+    # by a whole day only when a tick fails to land before the audit at all, and 13h18m of
+    # phase is far more slack than the two to eight hours this account actually loses. On
+    # the hourly schedule this replaced, GitHub ran four of the eighteen ticks that were
+    # due in the first eighteen hours -- it sheds high-frequency crons on public
+    # repositories, so "hourly" was already two to eight hours, and the dispatch hooks
+    # were doing nearly all of the prompt work. That
+    # phase is also what makes a dropped tick visible: it reads 37h18m at audit time, past
+    # the 32h the audit calls healthy. A morning slot would put a dropped tick at 29h18m
+    # and the audit would call it fine. Move this hour and the freshness constants at the top
+    # of scripts/audit.sh move with it. Quoted: a bare leading * is a YAML alias.
+    - cron: '23 17 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -80,7 +103,7 @@ permissions:
 # work. The running one is never cancelled, since it may be mid-push. The waiting
 # run checks out main as of when it starts (see `ref` below), so it sees the
 # earlier commit. A dry run never pushes, so it waits in a group of its own where
-# the next hourly tick cannot replace it before a person sees its summary.
+# a scheduled tick cannot replace it before a person sees its summary.
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.dry_run == true && 'dry-run' || 'live' }}
   cancel-in-progress: false
@@ -174,7 +197,7 @@ jobs:
             # it, or the step was skipped -- and then nothing had changed, so the loop below
             # found nothing to commit and exited 0. The single run that went wrong was the
             # only run to leave no trace: meta/last-run.json is what the weekly audit reads
-            # for freshness, and committing it every hour is also what keeps GitHub from
+            # for freshness, and committing it on every run is also what keeps GitHub from
             # disabling the schedule after sixty days with no repository activity. So write
             # the record here instead, and let it be committed like any other.
             if git diff --quiet -- meta/last-run.json; then
@@ -206,8 +229,9 @@ jobs:
           #                      retrying cannot help; OR GitHub answering 5xx or dropping
           #                      the connection -- retrying usually does
           # The last two are indistinguishable from inside the runner. This used to assume
-          # the unfixable one and exit on the first failure, so an hourly job that met a
-          # momentary wobble went red and waited for a person to notice. Retry first, then
+          # the unfixable one and exit on the first failure, so a job that met a momentary
+          # wobble went red and waited for a person -- and with a daily schedule that wait
+          # is a day, not an hour, which is why it retries here. Retry first, then
           # name both causes and let the reader look at the git output.
           push_to_main() {   # 0 pushed, 1 main moved under us, 2 out of ideas
             local try delay=0
@@ -225,7 +249,7 @@ jobs:
                 echo "push failed and main did not move (attempt $try of 3)"
               fi
             done
-            echo "::error::three pushes over three quarters of a minute failed and main never moved, so this is not a race. Either GitHub refused the push -- a branch rule on main, or contents: write missing from the workflow token -- or it was unwell throughout. The git output above says which. Nothing was pushed; the next scheduled run tries again."
+            echo "::error::three pushes over three quarters of a minute failed and main never moved, so this is not a race. Either GitHub refused the push -- a branch rule on main, or contents: write missing from the workflow token -- or it was unwell throughout. The git output above says which. Nothing was pushed; the next scheduled run tries again, which is a day away, so this is worth reading now rather than waiting out."
             return 2
           }
 

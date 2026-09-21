@@ -795,7 +795,7 @@ class ShrinkGuard(Harness):
     def test_trimming_one_blurb_warns_and_still_writes(self):
         """The edit the max_blurb_chars warning actively asks for. It is a large
         proportion of a small block -- one section of two here -- and refusing it would
-        leave the README stale and the hourly run red until someone dispatched
+        leave the README stale and the scheduled run red until someone dispatched
         allow_shrink by hand. Every section is still present and non-empty, and the
         cases where a source really has collapsed are each refused by name elsewhere,
         so this one is reported and written."""

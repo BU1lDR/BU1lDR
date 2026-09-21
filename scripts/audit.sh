@@ -22,18 +22,41 @@ REPO=${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)
 OWNER=${REPO%%/*}
 WORKFLOW=update-readme.yml
 AUDIT_WORKFLOW=audit.yml
-# The schedule in update-readme.yml is hourly, but GitHub runs a public repository's
-# schedule late and unevenly -- gaps of two to five hours between ticks are normal
-# here -- so a two-interval limit would cry wolf most Mondays. Freshness is judged
-# over a day: a day with no successful run is wrong whatever the scheduler does, and
-# the hazard that matters is the 60-day shutdown. A late scheduler is a warning.
-FRESH_LIMIT=$((26 * 3600))
-LATE_SCHEDULE=$((6 * 3600))
+# update-readme.yml is scheduled once a day at 17:23 UTC and this audit runs Mondays at
+# 06:41 UTC, so a tick that lands sits 13h18m before this check. Every limit below is that
+# phase, plus a whole missed tick, plus this audit's own lateness. GitHub runs a public
+# repository's schedule late and unevenly -- two to eight hours is normal on this account
+# -- but never early, so lateness only ever makes a measured age smaller; an age jumps by a
+# whole day only when a tick fails to land before this audit at all. Move the cron hour in
+# update-readme.yml and these move with it.
+#
+# One dropped or still-queued tick reads 37h18m here. Two silent days -- no tick, no push,
+# no dispatch -- read 61h18m and fail. 50h sits between them, with room for this audit
+# itself to be up to 12h42m late.
+FRESH_LIMIT=$((50 * 3600))
+# A tick that landed reads 13h18m at the scheduled audit, but this audit is also meant to be
+# run by hand from the Actions tab (audit.yml says so), and at an arbitrary hour a perfectly
+# healthy newest tick can be a full day plus its lateness old: 24h + 8h. Anything below that
+# is ok, so a hand run cannot report a dropped tick that never happened; a tick GitHub
+# really dropped reads 37h18m and warns.
+LATE_SCHEDULE=$((32 * 3600))
 # Beyond this the scheduler has not been late, it has stopped. The freshness check above
 # counts any successful run, so pushes and dispatches were able to mask a dead cron
-# indefinitely -- and the cron is the only thing that notices a release or a description
-# edit in a repository that has not pushed.
-STALE_SCHEDULE=$((48 * 3600))
+# indefinitely -- and the cron is the only thing that notices a description or homepage
+# edit, or a push from a repository whose dispatch hook is not delivering. Three dropped
+# days in a row read 85h18m and still only warn; four read 109h18m and fail. Being generous
+# costs nothing, because this audit looks once a week: a schedule GitHub has actually
+# disabled is a week old or more by the time anything asks.
+STALE_SCHEDULE=$((96 * 3600))
+# Every check above reads the newest run, and one observation cannot tell a daily schedule
+# from one firing every second or third day -- and that one stays inside all three limits
+# for ever. A weekly audit of a daily schedule has seven observations to hand, so the rate
+# is counted as well. Warn rather than fail at three or four: GitHub sheds scheduled load on
+# public repositories, and a bad week is not a broken repository.
+SCHEDULE_WINDOW_DAYS=7
+SCHEDULE_DUE=7
+SCHEDULE_RATE_OK=5
+SCHEDULE_RATE_WARN=3
 README_LIMIT=$((100 * 1024))
 UA="profile-readme-audit (+https://github.com/$REPO)"
 
@@ -93,7 +116,7 @@ else
     if [ "$age" -le "$FRESH_LIMIT" ]; then
       ok "last recorded run finished ${age}s ago ($finished)"
     else
-      bad "last recorded run finished ${age}s ago ($finished); the limit is ${FRESH_LIMIT}s -- no run has committed a record in a day"
+      bad "last recorded run finished ${age}s ago ($finished); the limit is ${FRESH_LIMIT}s -- no run has committed a record in two days, so the daily tick has not fired and nothing has pushed or dispatched either"
     fi
   fi
   if [ "$status" = "ok" ]; then
@@ -116,8 +139,12 @@ else
   fi
 fi
 
-newest_sched=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?event=schedule&per_page=1" \
-                 --jq '.workflow_runs[0].run_started_at // empty' 2>/dev/null) || newest_sched=""
+# One request answers both questions below: which was the newest scheduled run, and how many
+# there were. per_page=100 is a page and not a limit worth paging past: 100 daily ticks are
+# over three months, and a week can hold at most a handful more than SCHEDULE_DUE.
+sched_list=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?event=schedule&per_page=100" \
+               --jq '.workflow_runs[].run_started_at' 2>/dev/null) || sched_list=""
+newest_sched=$(printf '%s' "$sched_list" | head -1)
 if [ -z "$newest_sched" ]; then
   warn "no scheduled run of $WORKFLOW appears in the run history; pushes and dispatches are doing all the work"
 else
@@ -125,9 +152,26 @@ else
   if [ "$age" -le "$LATE_SCHEDULE" ]; then
     ok "newest scheduled run started ${age}s ago ($newest_sched)"
   elif [ "$age" -le "$STALE_SCHEDULE" ]; then
-    warn "newest scheduled run started ${age}s ago ($newest_sched); GitHub's scheduler is running late (gaps of two to eight hours are normal on this account). Nothing to do unless the limits above fail"
+    warn "newest scheduled run started ${age}s ago ($newest_sched); the daily tick has slipped, or GitHub dropped one (it sheds scheduled load on public repositories). Nothing to do unless a limit above fails or the rate below is short"
   else
-    bad "no scheduled run of $WORKFLOW in ${age}s ($newest_sched); the limit is ${STALE_SCHEDULE}s. The cron has stopped, and pushes or dispatches have been hiding it -- without the cron, a release or a description edit in a repository that has not pushed never reaches the profile. Check the Actions tab for a disabled schedule."
+    bad "no scheduled run of $WORKFLOW in ${age}s ($newest_sched); the limit is ${STALE_SCHEDULE}s. The schedule has stopped and pushes or dispatches have been hiding it -- without it, a description or homepage edit, or a push from a repository whose hook is not delivering, never reaches the profile. Check the Actions tab for a disabled schedule."
+  fi
+
+  # The rate, which the newest run cannot show: a schedule firing every third day is never
+  # old enough to fail any limit above, and would stay that way indefinitely.
+  sched_recent=$(printf '%s\n' "$sched_list" | "$PY" -c 'import sys, datetime as d
+cut = d.datetime.now(d.timezone.utc) - d.timedelta(days=int(sys.argv[1]))
+print(sum(1 for t in sys.stdin
+          if t.strip() and d.datetime.fromisoformat(t.strip().replace("Z", "+00:00")) >= cut))' \
+                   "$SCHEDULE_WINDOW_DAYS") || sched_recent=""
+  if [ -z "$sched_recent" ]; then
+    warn "the scheduled runs could not be counted, so only the newest one was checked"
+  elif [ "$sched_recent" -ge "$SCHEDULE_RATE_OK" ]; then
+    ok "$sched_recent scheduled runs in the last $SCHEDULE_WINDOW_DAYS days (about $SCHEDULE_DUE were due)"
+  elif [ "$sched_recent" -ge "$SCHEDULE_RATE_WARN" ]; then
+    warn "only $sched_recent scheduled runs in the last $SCHEDULE_WINDOW_DAYS days; about $SCHEDULE_DUE were due. Either GitHub is dropping ticks (it sheds scheduled load on public repositories) or the schedule is younger than the window -- this counts runs, not the days the cron has existed. If it is dropping them, anything only the schedule carries is arriving days late rather than a day late"
+  else
+    bad "only $sched_recent scheduled runs in the last $SCHEDULE_WINDOW_DAYS days; about $SCHEDULE_DUE were due. If the cron was added less than a week ago that is expected and this passes on its own; otherwise the schedule is firing occasionally at best, and every other check here calls that healthy: they all read the newest run, and a schedule firing every second or third day is never old enough to fail one of them."
   fi
 fi
 
@@ -225,7 +269,7 @@ rm -f "$readme_report"
 # The digest check above proves the block is exactly what the builder last wrote. It says
 # nothing about whether that is still true of the repositories it describes, which is the
 # one question a reader of the profile actually has. The builder already answers it:
-# --check exits 1 when a rebuild would differ. A stale README here means the hourly run
+# --check exits 1 when a rebuild would differ. A stale README here means the scheduled run
 # has stopped propagating even though it is green, which no other check in this file sees.
 check_token=${GH_TOKEN:-${GITHUB_TOKEN:-$(gh auth token 2>/dev/null)}}
 if [ -z "$check_token" ]; then
@@ -234,8 +278,8 @@ else
   check_out=$(GITHUB_TOKEN="$check_token" "$PY" tools/build_readme.py --check --no-meta 2>&1)
   case $? in
     0) ok "the block still matches the repositories it describes (build_readme.py --check)" ;;
-    1) bad "the block is out of date against the live repositories:"$'\n'"$(printf '%s\n' "$check_out" | sed 's/^/      /')"$'\n'"      If one of those repositories changed in the last hour or two, the next scheduled run carries it over and a re-run of this audit passes. If it does not, the hourly run is green and not propagating, which no other check here would notice." ;;
-    *) warn "build_readme.py --check could not answer (exit 2); the hourly run is the authority on build health and is checked above:"$'\n'"$(printf '%s\n' "$check_out" | tail -3 | sed 's/^/      /')" ;;
+    1) bad "the block is out of date against the live repositories:"$'\n'"$(printf '%s\n' "$check_out" | sed 's/^/      /')"$'\n'"      If one of those repositories changed since the last scheduled run, the next one carries it over and a re-run of this audit passes. If it does not, the daily run is green and not propagating, which no other check here would notice." ;;
+    *) warn "build_readme.py --check could not answer (exit 2); the scheduled run is the authority on build health and is checked above:"$'\n'"$(printf '%s\n' "$check_out" | tail -3 | sed 's/^/      /')" ;;
   esac
 fi
 
@@ -432,14 +476,14 @@ while IFS=$'\t' read -r name branch; do
   elif [ "$arrived" -gt 0 ]; then
     ok "$OWNER/$name: hook run at $run_created (${run_sha:0:7}) was followed by a repository_dispatch here"
   else
-    bad "$OWNER/$name: the hook ran at $run_created (${run_sha:0:7}) and its dispatch step reported success, but no repository_dispatch reached $REPO within fifteen minutes of it. The dispatch is failing -- PROFILE_DISPATCH_TOKEN revoked, expired, unused for a year, or scoped wrong. The hourly schedule still covers content; re-run docs/install-dispatch-secret.sh with a new token."
+    bad "$OWNER/$name: the hook ran at $run_created (${run_sha:0:7}) and its dispatch step reported success, but no repository_dispatch reached $REPO within fifteen minutes of it. The dispatch is failing -- PROFILE_DISPATCH_TOKEN revoked, expired, unused for a year, or scoped wrong. The daily schedule still covers content, a day late; re-run docs/install-dispatch-secret.sh with a new token."
   fi
 done < "$hook_repos"
 rm -f "$hook_repos"
 if [ "$listing_failed" = 1 ]; then
   bad "could not list $OWNER's repositories, so no hook was checked (the same silent-skip shape as the README block above: a process substitution's failure is invisible, so this is read from a file)"
 elif [ "$hooked" -eq 0 ]; then
-  warn "no project repository carries .github/workflows/notify-profile.yml; the profile updates on the hour only"
+  warn "no project repository carries .github/workflows/notify-profile.yml; the profile updates once a day only"
 fi
 
 # ----------------------------------------------------------------------- verdict
