@@ -30,15 +30,79 @@ jobs:
     name: audit the automation
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      lines: ${{ steps.audit.outputs.lines }}
+      warnings: ${{ steps.audit.outputs.warnings }}
+      failures: ${{ steps.audit.outputs.failures }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false   # nothing here pushes
 
+      # The audit's warn lines used to exist only in this step's log. A warning does not
+      # fail the job, so no issue was opened and no notification was sent, and nobody
+      # opens the log of a green run -- which made every warning the audit can raise (a
+      # dispatch token never installed, a link a datacenter IP cannot fetch, a scheduler
+      # starting to drift) a message written to a place with no reader. Three channels
+      # now: the step summary, which is on the run page whatever the verdict; annotations,
+      # which show on a green run too; and the failure issue below, which quotes the
+      # lines instead of asking the reader to go and find them.
       - name: Run the audit
+        id: audit
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/audit.sh   # through bash: a checkout from Windows may not carry the executable bit
+        # Through bash: a checkout from Windows may not carry the executable bit.
+        run: |
+          out="$RUNNER_TEMP/audit.txt"
+          status=0
+          bash scripts/audit.sh > "$out" 2>&1 || status=$?
+          cat "$out"
+
+          failures=$(grep -c '^FAIL ' "$out" || true)
+          warnings=$(grep -c '^warn ' "$out" || true)
+          notable=$(grep -E '^(FAIL|warn) ' "$out" || true)
+
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in
+              FAIL*) echo "::error title=Audit failure::${line#FAIL  }" ;;
+              warn*) echo "::warning title=Audit warning::${line#warn  }" ;;
+            esac
+          done <<< "$notable"
+
+          {
+            if [ "$status" -eq 0 ]; then
+              echo "## Audit passed"
+            else
+              echo "## Audit failed"
+            fi
+            echo
+            echo "$failures FAIL, $warnings warn."
+            if [ -n "$notable" ]; then
+              echo
+              echo '```'
+              echo "$notable"
+              echo '```'
+            fi
+            echo
+            echo '<details><summary>Every line</summary>'
+            echo
+            echo '```'
+            cat "$out"
+            echo '```'
+            echo
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "failures=$failures"
+            echo "warnings=$warnings"
+            echo 'lines<<AUDIT_LINES_EOF'
+            echo "$notable"
+            echo 'AUDIT_LINES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          exit $status
 
   report:
     name: open or update the failure issue
@@ -52,11 +116,28 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AUDIT_LINES: ${{ needs.audit.outputs.lines }}
+          AUDIT_FAILURES: ${{ needs.audit.outputs.failures }}
+          AUDIT_WARNINGS: ${{ needs.audit.outputs.warnings }}
         run: |
           title="README automation audit is failing"
+          # The lines themselves, not a link to them: an issue that says "open the run"
+          # is read once and then ignored, and a notification with no content in it
+          # cannot be triaged from a phone. If the job died before it could set its
+          # outputs -- a timeout, a runner failure -- say that rather than posting a
+          # blank list and implying the audit found nothing.
+          lines=${AUDIT_LINES:-}
+          if [ -z "$lines" ]; then
+            lines="(the audit's own output did not reach this job: it may have timed out or
+          the runner may have failed before the audit finished. Open the run.)"
+          fi
           body="Run: $RUN_URL
 
-          One or more FAIL lines in scripts/audit.sh. Open the run for the list.
+          ${AUDIT_FAILURES:-?} FAIL, ${AUDIT_WARNINGS:-?} warn in scripts/audit.sh:
+
+          \`\`\`
+          $lines
+          \`\`\`
 
           This issue is updated by every failed audit and closed by the next passing one."
           number=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \

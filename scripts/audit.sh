@@ -29,6 +29,11 @@ AUDIT_WORKFLOW=audit.yml
 # the hazard that matters is the 60-day shutdown. A late scheduler is a warning.
 FRESH_LIMIT=$((26 * 3600))
 LATE_SCHEDULE=$((6 * 3600))
+# Beyond this the scheduler has not been late, it has stopped. The freshness check above
+# counts any successful run, so pushes and dispatches were able to mask a dead cron
+# indefinitely -- and the cron is the only thing that notices a release or a description
+# edit in a repository that has not pushed.
+STALE_SCHEDULE=$((48 * 3600))
 README_LIMIT=$((100 * 1024))
 UA="profile-readme-audit (+https://github.com/$REPO)"
 
@@ -119,20 +124,22 @@ else
   age=$(( now - $(to_epoch "$newest_sched") ))
   if [ "$age" -le "$LATE_SCHEDULE" ]; then
     ok "newest scheduled run started ${age}s ago ($newest_sched)"
+  elif [ "$age" -le "$STALE_SCHEDULE" ]; then
+    warn "newest scheduled run started ${age}s ago ($newest_sched); GitHub's scheduler is running late (gaps of two to eight hours are normal on this account). Nothing to do unless the limits above fail"
   else
-    warn "newest scheduled run started ${age}s ago ($newest_sched); GitHub's scheduler is running late. Nothing to do unless the day-long limit above fails"
+    bad "no scheduled run of $WORKFLOW in ${age}s ($newest_sched); the limit is ${STALE_SCHEDULE}s. The cron has stopped, and pushes or dispatches have been hiding it -- without the cron, a release or a description edit in a repository that has not pushed never reaches the profile. Check the Actions tab for a disabled schedule."
   fi
 fi
 
 # ---------------------------------------------------- README.md and the managed block
-while IFS= read -r line; do
-  case "$line" in
-    "problem: "*) bad "${line#problem: }" ;;
-    "warning: "*) warn "${line#warning: }" ;;
-    "ok: "*)      ok "${line#ok: }" ;;
-    *)            [ -n "$line" ] && echo "$line" ;;
-  esac
-done < <("$PY" - "$README_LIMIT" <<'PYEOF'
+# Run to a file and check the status, never through a process substitution: the exit
+# status of `done < <(cmd)` is the status of `done`, so every way this block could die
+# -- README.md gone, profile.config.json gone, a renamed function in build_readme.py,
+# a SyntaxError from a bad edit -- used to print nothing, count nothing, and let the
+# audit report "audit passed: 0 failures". The audit's whole subject is this file; an
+# audit that inspected nothing must not be able to say it looked.
+readme_report=$(mktemp)
+if ! "$PY" - "$README_LIMIT" > "$readme_report" 2>&1 <<'PYEOF'
 import json, re, sys
 from pathlib import Path
 sys.path.insert(0, "tools")
@@ -149,8 +156,20 @@ else:
     print(f"ok: README.md is {len(raw):,} bytes")
 if b"\r" in raw:
     print("problem: README.md has CRLF line endings; the builder will refuse it")
+# Strings that are never English: a failure anywhere in the file.
+never_english = (
+    (r"\[object Object\]", "[object Object]"), (r"Maximum retries", "Maximum retries"),
+    (r"Bad credentials", "Bad credentials"), (r"Traceback \(most recent", "a Python traceback"),
+    (r"<class '", "a Python repr"),
+)
+hits = [label for pattern, label in never_english if re.search(pattern, text)]
+for label in hits:
+    print(f"problem: README.md contains {label}")
+if not hits:
+    print("ok: none of [object Object] / Maximum retries / Bad credentials / a traceback / a repr is present")
 counts = (text.count(start), text.count(end))
 if counts != (1, 1):
+    # Everything below needs the block. The scan above did not, which is why it ran first.
     print(f"problem: marker counts are {counts}; expected one START and one END")
     sys.exit(0)
 print("ok: one START and one END marker")
@@ -180,17 +199,6 @@ if meta_path.exists():
         print(f"warning: the last build shrank the block from {before:,} to {after:,} bytes ({note}); look at the page")
     if marks == 0:
         print("problem: the block has no sections")
-# Strings that are never English: a failure anywhere in the file.
-never_english = (
-    (r"\[object Object\]", "[object Object]"), (r"Maximum retries", "Maximum retries"),
-    (r"Bad credentials", "Bad credentials"), (r"Traceback \(most recent", "a Python traceback"),
-    (r"<class '", "a Python repr"),
-)
-hits = [label for pattern, label in never_english if re.search(pattern, text)]
-for label in hits:
-    print(f"problem: README.md contains {label}")
-if not hits:
-    print("ok: none of [object Object] / Maximum retries / Bad credentials / a traceback / a repr is present")
 # Words that are English as often as they are a bug ("Dependencies: None"): a warning,
 # and only inside the block, where API text lands. An unfilled placeholder is not
 # checked for: substitute() is single-pass and the digest above proves the block is
@@ -200,7 +208,36 @@ soft = [word for word in ("None", "undefined", "NaN") if re.search(rf"\b{word}\b
 if soft:
     print(f"warning: the block contains the word(s) {', '.join(soft)}; check on the page that they are prose, not a rendered null")
 PYEOF
-)
+then
+  bad "the README checks did not run: python exited non-zero. This script imports tools/build_readme.py (load_config, inner_block, digest, SECTION_MARK, BUILD_STAMP); if any of those moved, this script has to move with them. Its output follows."
+fi
+while IFS= read -r line; do
+  case "$line" in
+    "problem: "*) bad "${line#problem: }" ;;
+    "warning: "*) warn "${line#warning: }" ;;
+    "ok: "*)      ok "${line#ok: }" ;;
+    *)            [ -n "$line" ] && echo "      $line" ;;
+  esac
+done < "$readme_report"
+rm -f "$readme_report"
+
+# --------------------------------------------- the block still matches the repositories
+# The digest check above proves the block is exactly what the builder last wrote. It says
+# nothing about whether that is still true of the repositories it describes, which is the
+# one question a reader of the profile actually has. The builder already answers it:
+# --check exits 1 when a rebuild would differ. A stale README here means the hourly run
+# has stopped propagating even though it is green, which no other check in this file sees.
+check_token=${GH_TOKEN:-${GITHUB_TOKEN:-$(gh auth token 2>/dev/null)}}
+if [ -z "$check_token" ]; then
+  info "no token available, so the block was not compared against the live repositories (--check skipped)"
+else
+  check_out=$(GITHUB_TOKEN="$check_token" "$PY" tools/build_readme.py --check --no-meta 2>&1)
+  case $? in
+    0) ok "the block still matches the repositories it describes (build_readme.py --check)" ;;
+    1) bad "the block is out of date against the live repositories -- the hourly run is green but not propagating:"$'\n'"$(printf '%s\n' "$check_out" | sed 's/^/      /')" ;;
+    *) warn "build_readme.py --check could not answer (exit 2); the hourly run is the authority on build health and is checked above:"$'\n'"$(printf '%s\n' "$check_out" | tail -3 | sed 's/^/      /')" ;;
+  esac
+fi
 
 # ------------------------------------------------------------------- images and links
 probe() {  # url -> "code content-type"
@@ -242,7 +279,14 @@ while IFS= read -r url; do
     *)
       case "$host" in
         github.com|*.github.io|raw.githubusercontent.com|*.githubusercontent.com)
-          bad "link $url -> $code (GitHub-hosted; this should never fail)" ;;
+          # A 404 or 410 from GitHub is a real dead link. A 429 or a 5xx is GitHub rate-
+          # limiting or wobbling, which it does to Actions runner IPs, and failing the
+          # weekly audit for it trains the owner to ignore a red audit -- the same damage
+          # as a silent pass, from the other direction.
+          case "$code" in
+            429|5??|000) warn "link $url -> $code (GitHub-hosted, but a rate limit or a wobble rather than a dead link; re-run the audit)" ;;
+            *) bad "link $url -> $code (GitHub-hosted; this should never fail)" ;;
+          esac ;;
         *)
           warn "link $url -> $code (third-party host; 999/403/503 from a datacenter IP usually means bot protection, not a dead link -- check it in a browser)" ;;
       esac ;;
@@ -314,6 +358,13 @@ newest_dispatch=$(gh api "repos/$REPO/actions/runs?event=repository_dispatch&per
 dispatch_epoch=0
 [ -n "$newest_dispatch" ] && dispatch_epoch=$(to_epoch "$newest_dispatch")
 hooked=0
+listing_failed=0
+hook_repos=$(mktemp)
+if ! gh api "users/$OWNER/repos?type=owner&per_page=100" --paginate \
+       --jq '.[] | select(.fork == false and .archived == false and .private == false and .name != "'"$OWNER"'") | [.name, .default_branch] | @tsv' 2>/dev/null \
+     | tr -d '\r' > "$hook_repos"; then
+  listing_failed=1
+fi
 while IFS=$'\t' read -r name branch; do
   [ -n "$name" ] || continue
   if ! gh api "repos/$OWNER/$name/contents/.github/workflows/notify-profile.yml?ref=$branch" --jq .sha > /dev/null 2>&1; then
@@ -363,9 +414,13 @@ while IFS=$'\t' read -r name branch; do
   else
     bad "$OWNER/$name: the hook ran at $run_created (${run_sha:0:7}) and its dispatch step reported success, but no repository_dispatch reached $REPO within fifteen minutes of it. The dispatch is failing -- PROFILE_DISPATCH_TOKEN revoked, expired, unused for a year, or scoped wrong. The hourly schedule still covers content; re-run docs/install-dispatch-secret.sh with a new token."
   fi
-done < <(gh api "users/$OWNER/repos?type=owner&per_page=100" --paginate \
-           --jq '.[] | select(.fork == false and .archived == false and .private == false and .name != "'"$OWNER"'") | [.name, .default_branch] | @tsv' 2>/dev/null | tr -d '\r' || true)
-[ "$hooked" -gt 0 ] || warn "no project repository carries .github/workflows/notify-profile.yml; the profile updates on the hour only"
+done < "$hook_repos"
+rm -f "$hook_repos"
+if [ "$listing_failed" = 1 ]; then
+  bad "could not list $OWNER's repositories, so no hook was checked (the same silent-skip shape as the README block above: a process substitution's failure is invisible, so this is read from a file)"
+elif [ "$hooked" -eq 0 ]; then
+  warn "no project repository carries .github/workflows/notify-profile.yml; the profile updates on the hour only"
+fi
 
 # ----------------------------------------------------------------------- verdict
 echo
