@@ -320,13 +320,20 @@ while IFS=$'\t' read -r name branch; do
     continue
   fi
   hooked=$((hooked + 1))
+  # run_started_at is the start of the latest attempt (a re-run moves it; created_at
+  # does not), which is what the arrival window below must be anchored on. Every field
+  # gets a placeholder: tab is IFS whitespace, and an empty field would shift the rest.
   last=$(gh api "repos/$OWNER/$name/actions/workflows/notify-profile.yml/runs?branch=$branch&per_page=1" \
-           --jq '.workflow_runs[0] | select(. != null) | [.id, .created_at, .conclusion, .head_sha] | @tsv' 2>/dev/null | tr -d '\r') || last=""
+           --jq '.workflow_runs[0] | select(. != null) | [.id, (.run_started_at // .created_at), (.conclusion // "-"), (.head_sha // "-")] | @tsv' 2>/dev/null | tr -d '\r') || last=""
   if [ -z "$last" ]; then
     info "$OWNER/$name: hook present; its runs cannot be read from here, or it has not run yet"
     continue
   fi
   IFS=$'\t' read -r run_id run_created run_conclusion run_sha <<< "$last"
+  if [ "$run_conclusion" = "-" ]; then
+    info "$OWNER/$name: the hook's latest run ($run_created, ${run_sha:0:7}) has not finished yet"
+    continue
+  fi
   step=$(gh api "repos/$OWNER/$name/actions/runs/$run_id/jobs" \
            --jq '[.jobs[].steps[] | select(.name | startswith("Tell "))][0].conclusion // "absent"' 2>/dev/null | tr -d '\r') || step="unreadable"
   case "$step" in

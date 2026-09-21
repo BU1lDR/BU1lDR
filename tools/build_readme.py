@@ -60,14 +60,15 @@ WHAT EACH REPOSITORY CONTROLS
                             {version}, {license}, {description} and {name} are API text
                             and are rendered as *plain text*: HTML in them is shown,
                             not interpreted, Markdown punctuation is escaped, newlines
-                            become spaces, invisible format characters are dropped,
-                            and they cannot open a heading, a list, a Markdown link, a
-                            comment or a code span (GitHub still autolinks a bare
-                            https:// or www. host in any text). Do not wrap them in
-                            backticks. {url} and {live} are validated URLs, inserted as
-                            they are. A body may not end inside an open code fence or
-                            an open <pre>, <script>, <style> or <textarea>: on the page
-                            that would swallow every section after it.
+                            become spaces, the invisible characters that reorder or
+                            hide text are dropped, and they cannot open a heading, a
+                            list, a Markdown link, a comment or a code span (GitHub
+                            still autolinks a bare https:// or www. host in any text).
+                            Do not wrap them in backticks. {url} and {live} are
+                            validated URLs, inserted as they are. A body may not end
+                            inside an open code fence, an open <pre>, <script>, <style>
+                            or <textarea>, an open <?...?> or an open <![CDATA[: on the
+                            page that would swallow every section after it.
     snippets/<name>.md      same format, kept in THIS repository; used only when the
                             repository has no .github/PROFILE.md
     (neither)               "### [<name>](<url>)" with the GitHub description as body,
@@ -604,12 +605,20 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BIDI = re.compile("[\u202a-\u202e\u2066-\u2069]")
 
 
+# The format characters that reorder, hide or pad what a line appears to say: bidi
+# embeddings, overrides and isolates (the Trojan-Source set), the zero-width space,
+# the soft hyphen, the word joiner and invisible operators, the byte-order mark, the
+# Mongolian vowel separator and the interlinear annotation characters. Not the
+# zero-width non-joiner and joiner (orthographic in Persian, Kurdish and Indic
+# scripts; emoji sequences), not the directional marks and the Arabic letter mark
+# (they order punctuation, not text), and not the emoji tag characters (flags).
+_INVISIBLE = re.compile("[\u202a-\u202e\u2066-\u2069\u200b\u00ad\u2060-\u2064\ufeff\u180e\ufff9-\ufffb]")
+
+
 def strip_format_characters(text: str) -> str:
-    """Remove Unicode format characters (category Cf): bidi controls, zero-width
-    spaces, soft hyphens, byte-order marks, word joiners -- invisible, and able to
-    reorder or hide what a line appears to say. U+200D, the zero-width joiner, is
-    kept: emoji sequences are built from it."""
-    return "".join(ch for ch in text if ch == "\u200d" or unicodedata.category(ch) != "Cf")
+    """Remove the format characters that can reorder or hide text -- see _INVISIBLE --
+    and keep the ones a script needs to read correctly."""
+    return _INVISIBLE.sub("", text)
 
 
 def valid_url(text: str) -> bool:
@@ -778,16 +787,24 @@ def render_section(repo: dict, release: dict | None, blurb: str | None, where: s
 
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-_HTML_BLOCK_START = re.compile(r"^ {0,3}<(pre|script|style|textarea)(?=[\s>]|$)", re.IGNORECASE)
+# The HTML block kinds that end only at a closing sequence, never at a blank line
+# (CommonMark 4.6 types 1, 3 and 5): the opener, and the regex that closes it.
+_HTML_OPENERS = (
+    (re.compile(r"^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)", re.IGNORECASE),
+     re.compile(r"</(?:pre|script|style|textarea)>", re.IGNORECASE), "<pre>/<script>/<style>/<textarea> block"),
+    (re.compile(r"^ {0,3}<\?"), re.compile(r"\?>"), "<?...?> processing-instruction block"),
+    (re.compile(r"^ {0,3}<!\[CDATA\["), re.compile(r"\]\]>"), "CDATA block"),
+)
 
 
 def open_block(text: str) -> str | None:
     """The kind of block the text ends inside, or None. Per CommonMark an unclosed
-    code fence, or an unclosed <pre>, <script>, <style> or <textarea>, runs to the
-    end of the document -- which here means through every later section, the end
-    marker and the rest of the README."""
+    code fence, an unclosed <pre>/<script>/<style>/<textarea>, an unclosed <?...?>
+    or an unclosed <![CDATA[ runs to the end of the document -- which here means
+    through every later section, the end marker and the rest of the README. (An
+    unclosed comment or declaration is bounded by the next section mark's "-->".)"""
     fence: tuple[str, int] | None = None
-    html: str | None = None
+    html: tuple[re.Pattern, str] | None = None
     for line in text.split("\n"):
         if fence is not None:
             match = _FENCE.match(line)
@@ -796,22 +813,25 @@ def open_block(text: str) -> str | None:
                 fence = None
             continue
         if html is not None:
-            if re.search(rf"</{html}>", line, re.IGNORECASE):
+            if html[0].search(line):
                 html = None
             continue
         match = _FENCE.match(line)
-        if match:
+        # A backtick fence's info string may not contain a backtick: "```foo``` is" is
+        # a paragraph with a code span, not an opener.
+        if match and not (match.group(1)[0] == "`" and "`" in line[match.end():]):
             fence = (match.group(1)[0], len(match.group(1)))
             continue
-        match = _HTML_BLOCK_START.match(line)
-        if match:
-            html = match.group(1).lower()
-            if re.search(rf"</{html}>", line[match.end():], re.IGNORECASE):
-                html = None
+        for opener, closer, kind in _HTML_OPENERS:
+            match = opener.match(line)
+            if match:
+                if not closer.search(line[match.end():]):
+                    html = (closer, kind)
+                break
     if fence is not None:
         return f"code fence ({fence[0] * fence[1]})"
     if html is not None:
-        return f"<{html}> block"
+        return html[1]
     return None
 
 
@@ -1060,20 +1080,29 @@ def build(root: Path, source, check: bool, summary_file: Path | None, out=None, 
         if still is None:
             continue  # deleted, or private to this token: an answer
         hint = " -- update profile.config.json" if gone.lower() in curated else ""
-        if still["id"] in listed_ids:
-            # The lookup followed GitHub's redirect to a repository the listing already
-            # has under its new name -- a rename, including one that only changed case.
-            warn(f"{gone} is now listed as {still['name']!r} (renamed); dropping the old section{hint}")
-            continue
-        if still["full_name"].split("/")[0].lower() != login.lower():
+        same_owner = still["full_name"].split("/")[0].lower() == login.lower()
+        same_name = still["name"] == gone
+        if same_owner and same_name:
+            if still["id"] in listed_ids:
+                # Still listed under the same name, yet no longer selected: it has
+                # stopped qualifying. Say why, so the record and the commit message
+                # tell the truth.
+                reason = ("archived" if still["archived"] else "a fork" if still["fork"]
+                          else "not public" if not is_public(still) else "no longer selected")
+                warn(f"{gone} is still listed but is now {reason}; dropping its section{hint}")
+                continue
+            if select([still], config):
+                raise BuildError(f"{gone} is still a public repository but was absent from the listing; "
+                                 "refusing to drop its section")
+            continue  # exists, but private/archived/fork and not listed: an answer
+        if not same_owner:
             warn(f"{gone} has moved to {still['full_name']!r}; dropping its section{hint}")
             continue
-        if still["name"].lower() != gone.lower():
-            warn(f"{gone} appears to have been renamed to {still['name']!r}; dropping the old section{hint}")
-            continue
-        if select([still], config):
-            raise BuildError(f"{gone} is still a public repository but was absent from the listing; "
-                             "refusing to drop its section")
+        # The lookup followed GitHub's redirect to the repository's new name -- a
+        # rename, including one that only changed case -- whether or not the listing
+        # already shows it.
+        shown = " (renamed)" if still["id"] in listed_ids else " (renamed; not in this listing)"
+        warn(f"{gone} is now {still['name']!r}{shown}; dropping the old section{hint}")
 
     # The shrink guard compares against a block this tool wrote (one with sections
     # in it), never against a placeholder left in the file for the first run.

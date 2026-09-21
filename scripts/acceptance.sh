@@ -63,9 +63,11 @@ build() {  # root fixtures [flags...]
 }
 
 # ---------------------------------------------------------------- (a) idempotent
+# --allow-shrink: the property under test is idempotency; a snapshot that has fallen
+# behind the live block must not fail it on size (test.yml reports staleness).
 root=$(fresh_root README.md profile.config.json)
 assert_markers "$root/README.md"
-build "$root" fixtures/api > /dev/null
+build "$root" fixtures/api --allow-shrink > /dev/null
 assert_markers "$root/README.md"
 if cmp -s "$root/README.md" README.md; then
   echo "note  fixtures/api reproduces the committed README.md exactly"
@@ -74,7 +76,7 @@ else
 fi
 git -C "$root" add README.md
 git -C "$root" commit -q -m "first run" --allow-empty
-build "$root" fixtures/api > /dev/null
+build "$root" fixtures/api --allow-shrink > /dev/null
 assert_markers "$root/README.md"
 git -C "$root" diff --exit-code -- README.md > /dev/null || fail "(a) the second run changed README.md"
 pass "(a) two consecutive fixture runs; the second left README.md untouched"

@@ -526,8 +526,11 @@ class HostileInput(Harness):
             "12) item": "12\\) item",
             "1.": "1\\.",
             "a\u202eb\u202c c": "ab c",
-            "soft\u00adhyphen zero\u200bwidth \ufeffbom": "softhyphen zerowidth bom",
+            "soft\u00adhyphen zero\u200bwidth \ufeffbom word\u2060joiner": "softhyphen zerowidth bom wordjoiner",
             "\U0001F468\u200d\U0001F469\u200d\U0001F467": "\U0001F468\u200d\U0001F469\u200d\U0001F467",
+            "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645": "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",   # Persian needs the ZWNJ
+            "\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F": "\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F",  # a tag-sequence flag
+            "\u200eLRM and ALM\u061c stay": "\u200eLRM and ALM\u061c stay",
             "= rule": "= rule",
             "---": "\\---",
             "===": "\\===",
@@ -597,18 +600,26 @@ class HostileInput(Harness):
         self.profile("first", "# first — t\n\n~~~~\nx\n~~~\n")   # a shorter run does not close it
         self.assert_refused("unclosed code fence (~~~~)")
         self.profile("first", "# first — t\n\n<pre>\nraw\n")
-        self.assert_refused("unclosed <pre> block")
+        self.assert_refused("unclosed <pre>/<script>/<style>/<textarea> block")
         self.profile("first", "# first — t\n\n<SCRIPT src=x>\nalert(1)\n")
-        self.assert_refused("unclosed <script> block")
+        self.assert_refused("unclosed <pre>/<script>/<style>/<textarea> block")
+        self.profile("first", "# first — t\n\n<?php echo 'hi';\nstill here\n")
+        self.assert_refused("unclosed <?...?> processing-instruction block")
+        self.profile("first", "# first — t\n\n<![CDATA[\nraw\n")
+        self.assert_refused("unclosed CDATA block")
         self.profile("first", "# first — t\n\n```py\ncode with ``` inside\n```\n\n<pre>one line</pre>\n\n"
-                              "<details><summary>s</summary>\n\nfine\n\n</details>\n\n~~~\nx\n~~~~\n")
+                              "<details><summary>s</summary>\n\nfine\n\n</details>\n\n~~~\nx\n~~~~\n\n"
+                              "```foo``` is a code span, not a fence.\n\n<pre>\nclosed by another tag\n</script>\n\n"
+                              "<?xml version='1.0'?>\n\n<![CDATA[x]]>\n\n<!-- an unclosed comment is bounded by the next mark\n")
         code, _, readme = self.run_build()
         self.assertEqual(code, 0)
         self.assertIn("```py\ncode with ``` inside\n```\n", readme)
         self.assertIsNone(br.open_block("```\n```"))
         self.assertEqual(br.open_block("````\n```"), "code fence (````)")
         self.assertIsNone(br.open_block("<pre>a</pre>"))
-        self.assertEqual(br.open_block("<textarea>\n"), "<textarea> block")
+        self.assertEqual(br.open_block("<textarea>\n"), "<pre>/<script>/<style>/<textarea> block")
+        self.assertIsNone(br.open_block("~~~foo~~~ tildes may carry backticks\n"))  # a tilde fence's info string may
+        self.assertEqual(br.open_block("~~~foo~~~\n"), "code fence (~~~)")           # ...but this one is then unclosed
 
     def test_placeholders_in_the_display_name_arrive_escaped_and_are_accepted(self):
         self.repos(repo("first"))
@@ -875,7 +886,7 @@ class Lifecycle(Harness):
         for line in ("deleted: removed", "hidden: removed", "boxed: removed", "noisy: removed",
                      "oldname: removed", "newname: added"):
             self.assertIn(line, out)
-        self.assertIn("oldname is now listed as 'newname' (renamed)", out)
+        self.assertIn("oldname is now 'newname' (renamed); dropping the old section", out)
         # Both uncurated with the same pushed_at: by name, "first" before "newname".
         self.assertEqual(list(self.sections(readme)), ["first", "newname"])
 
@@ -889,11 +900,29 @@ class Lifecycle(Harness):
         self.repo_detail(repo("moved", description="m", repo_id=8, owner="otherorg"))    # the 301 to the new owner, followed
         code, out, readme = self.run_build()
         self.assertEqual(code, 0)
-        self.assertIn("Foo is now listed as 'foo' (renamed)", out)
+        self.assertIn("Foo is now 'foo' (renamed); dropping the old section", out)
         self.assertIn("moved has moved to 'otherorg/moved'", out)
         self.assertEqual(list(self.sections(readme)), ["foo", "keep"])
         for line in ("foo: added", "Foo: removed", "moved: removed"):
             self.assertIn(line, out)
+
+    def test_a_repository_that_stops_qualifying_but_stays_listed_is_dropped_with_the_true_reason(self):
+        self.uncurated()
+        self.repos(repo("first", description="a"), repo("boxed", description="b"), repo("forked", description="c"),
+                   repo("hidden", description="d"))
+        self.run_build()
+        # GitHub keeps listing an archived repository; the lookup answers with the same object.
+        self.repos(repo("first", description="a"), repo("boxed", description="b", archived=True),
+                   repo("forked", description="c", fork=True), repo("hidden", description="d", private=True))
+        for name, kwargs in (("boxed", {"archived": True}), ("forked", {"fork": True}), ("hidden", {"private": True})):
+            self.repo_detail(repo(name, description="x", **kwargs))
+        code, out, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("boxed is still listed but is now archived; dropping its section", out)
+        self.assertIn("forked is still listed but is now a fork; dropping its section", out)
+        self.assertIn("hidden is still listed but is now not public; dropping its section", out)
+        self.assertNotIn("renamed", out)
+        self.assertEqual(list(self.sections(readme)), ["first"])
 
     def test_a_failed_write_leaves_readme_whole_and_no_temp_file(self):
         self.repos(repo("first"))

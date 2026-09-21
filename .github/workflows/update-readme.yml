@@ -185,8 +185,13 @@ jobs:
             fi
           }
 
+          rebuild_failed=0
           for attempt in 1 2 3; do
             if git diff --quiet -- README.md meta/last-run.json && [ -z "$(git status --porcelain -- meta/last-run.json)" ]; then
+              if [ "$rebuild_failed" = 1 ]; then
+                echo "::error::the rebuild on the new head failed before it could write a run record"
+                exit 1
+              fi
               echo "Nothing to commit: README.md and meta/last-run.json already match."
               exit 0
             fi
@@ -196,7 +201,11 @@ jobs:
               if [ "$BUILD_OUTCOME" = "success" ]; then
                 exit 0
               fi
-              echo "::error::the rebuild on the new head failed; its run record is committed, README.md is untouched"
+              if [ "$rebuild_failed" = 1 ]; then
+                echo "::error::the rebuild on the new head failed; its run record is committed, README.md is untouched"
+              else
+                echo "::error::the build failed; its run record is committed, README.md is untouched"
+              fi
               exit 1
             fi
             git fetch origin main
@@ -215,6 +224,7 @@ jobs:
                 # The rebuild failed on the new head. Its run record says why; commit
                 # that on the next pass, with README.md as the new head has it.
                 BUILD_OUTCOME=failure
+                rebuild_failed=1
                 git checkout -- README.md
               fi
             else
