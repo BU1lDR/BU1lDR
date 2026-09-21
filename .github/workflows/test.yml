@@ -1,0 +1,65 @@
+# CI for the builder itself, on pull requests that touch it. No secrets, no network
+# for the builder: the unit tests and the offline acceptance checks run against a
+# black-holed proxy, so a test that reached GitHub would fail rather than pass by
+# luck. The Update README workflow runs the same unit tests before every rebuild;
+# this is the copy that runs before a change reaches main.
+
+name: Test the builder
+
+on:
+  pull_request:
+    paths:
+      - 'tools/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'fixtures/**'
+      - 'profile.config.json'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true   # a newer push to the same PR supersedes the older run
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: unit tests and acceptance checks, offline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Unit tests
+        env:
+          HTTPS_PROXY: http://127.0.0.1:1
+          HTTP_PROXY: http://127.0.0.1:1
+        run: python3 -m unittest discover -s tests -t . -v 2>&1 | tail -n 5
+
+      - name: Acceptance checks (a, b, d, e, f, g, i)
+        run: scripts/acceptance.sh --offline
+
+      - name: The builder reproduces the committed README from the fixture snapshot
+        # Informational: fixtures/api is a snapshot of the live account. When the
+        # account moves on, the snapshot goes stale and this prints a note, not a
+        # failure. Refresh it with `scripts/snapshot-fixtures.sh` when it matters.
+        env:
+          NOW: 2026-09-21T12:00:00Z
+        run: |
+          tmp=$(mktemp -d)
+          cp README.md profile.config.json "$tmp/"
+          python3 tools/build_readme.py --root "$tmp" --fixtures fixtures/api --no-meta
+          if cmp -s "$tmp/README.md" README.md; then
+            echo "fixtures/api reproduces README.md byte for byte."
+          else
+            echo "::notice::fixtures/api is stale against README.md (the account has moved on); not a failure"
+            diff -u README.md "$tmp/README.md" || true
+          fi

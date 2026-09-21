@@ -1,0 +1,15 @@
+# Every action in .github/workflows is pinned to a commit SHA. Dependabot opens a PR
+# when a pinned action publishes a new release, so the pins move on purpose rather
+# than rot. The builder has no package dependencies (standard library only), so
+# there is no pip ecosystem entry.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    commit-message:
+      prefix: "ci"
