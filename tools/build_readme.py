@@ -6,6 +6,7 @@
     python3 tools/build_readme.py --fixtures DIR               # offline: read the API's answers from DIR
     python3 tools/build_readme.py --summary-file PATH          # also write a commit-message-shaped summary
     python3 tools/build_readme.py --meta-file PATH             # machine-readable record of the run
+    python3 tools/build_readme.py --record-failure REASON      # only record that an earlier step failed
     python3 tools/build_readme.py --root DIR                   # README.md and profile.config.json live here
     python3 tools/build_readme.py --allow-shrink               # accept a Work section that lost most of itself
     python3 tools/build_readme.py --anonymous                  # no token: 60 requests an hour, for a look
@@ -1220,8 +1221,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary-file", type=Path, help="write a commit-message-shaped summary here")
     parser.add_argument("--meta-file", type=Path, help="write the run record here (default: ROOT/meta/last-run.json)")
     parser.add_argument("--no-meta", action="store_true", help="do not write a run record")
+    parser.add_argument("--record-failure", metavar="REASON",
+                        help="write a run record saying this run never got as far as building, then exit 0; "
+                             "for a workflow whose earlier step failed, so no other step will leave a record")
     parser.add_argument("--allow-shrink", action="store_true",
-                        help="accept a Work section over 20%% smaller with no repository removed")
+                        help="accept a Work section that keeps less than a quarter of its bytes "
+                             "with no repository removed (a smaller shrink only warns)")
     parser.add_argument("--anonymous", action="store_true", help="talk to the API without GITHUB_TOKEN")
     parser.add_argument("--verbose", action="store_true", help="log each request as 'GET <url> -> <status>' on stderr")
     args = parser.parse_args(argv)
@@ -1232,6 +1237,23 @@ def main(argv: list[str] | None = None) -> int:
     report: dict = {"schema": 1, "status": "error", "exit_code": EXIT_ERROR, "error": None,
                     "finished_at": None, "source": None, "actions": _actions_context()}
     meta_path = None if (args.check or args.no_meta) else (args.meta_file or args.root / "meta" / "last-run.json")
+
+    if args.record_failure is not None:
+        # Nothing is read and nothing is built: no network, no token, no config, not even
+        # README.md, because the case this exists for is one where an earlier step already
+        # failed. It exits 0 -- failing to run is what it reports, not what it does.
+        if meta_path is None:
+            print("error: --record-failure has nothing to write with --check or --no-meta", file=sys.stderr)
+            return EXIT_ERROR
+        report.update(status="error", exit_code=None, error=args.record_failure,
+                      finished_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      changed=False, changes=[])
+        # No sections and no block_bytes, on purpose: this run did not look at the README,
+        # and the audit compares a recorded section count against the page. A guess there
+        # would be a fabricated measurement, which is worse than a missing one.
+        write_meta(meta_path, report)
+        print(f"recorded a failed run in {meta_path}: {args.record_failure}")
+        return EXIT_OK
 
     def fail(message: str) -> int:
         print(f"error: {message}", file=sys.stderr)

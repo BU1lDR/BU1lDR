@@ -28,7 +28,10 @@
 # last touched the cron line, which is not a place anyone reads).
 #
 # Anti-decay. GitHub disables the schedule in a public repository after 60 days
-# without a commit; the run record is committed every hour, so that never comes.
+# without a commit; the run record is committed every hour, so that never comes. That
+# holds even when the build never happens: a run whose earlier step failed writes the
+# record itself (--record-failure) rather than committing nothing, which is what it
+# used to do on the one run of the day that a person most needed a record of.
 # The last step pings an external monitor when the HEALTHCHECK_URL secret is set --
 # the one signal that survives this workflow not running at all. To set it up: make
 # a check at healthchecks.io (or cronitor.io) with a period of 1 hour and a grace of
@@ -51,7 +54,7 @@ on:
         type: boolean
         default: false
       allow_shrink:
-        description: Accept a Work section more than 20% smaller with no repository removed
+        description: Accept a Work section that keeps under a quarter of its bytes with no repository removed
         type: boolean
         default: false
   repository_dispatch:
@@ -166,6 +169,18 @@ jobs:
             # The builder's contract is that a failed run leaves README.md untouched.
             # Hold it to that here too: only the run record may reach the commit.
             git checkout -- README.md
+            # The builder writes its own record whenever it runs at all, even to say it
+            # failed. This is the case where it never ran -- the unit tests failed ahead of
+            # it, or the step was skipped -- and then nothing had changed, so the loop below
+            # found nothing to commit and exited 0. The single run that went wrong was the
+            # only run to leave no trace: meta/last-run.json is what the weekly audit reads
+            # for freshness, and committing it every hour is also what keeps GitHub from
+            # disabling the schedule after sixty days with no repository activity. So write
+            # the record here instead, and let it be committed like any other.
+            if git diff --quiet -- meta/last-run.json; then
+              python3 tools/build_readme.py --meta-file meta/last-run.json --record-failure \
+                "the build step did not run (outcome: $BUILD_OUTCOME): a step before it failed, so nothing in this run measured the repositories"
+            fi
           fi
 
           rebuild() {
@@ -185,6 +200,35 @@ jobs:
             fi
           }
 
+          # A push from here fails in three ways, and they need different answers:
+          #   main moved         a race with another push: rebuild on the new head (below)
+          #   main did not move  a branch rule, or contents: write missing from the token --
+          #                      retrying cannot help; OR GitHub answering 5xx or dropping
+          #                      the connection -- retrying usually does
+          # The last two are indistinguishable from inside the runner. This used to assume
+          # the unfixable one and exit on the first failure, so an hourly job that met a
+          # momentary wobble went red and waited for a person to notice. Retry first, then
+          # name both causes and let the reader look at the git output.
+          push_to_main() {   # 0 pushed, 1 main moved under us, 2 out of ideas
+            local try delay=0
+            for try in 1 2 3; do
+              [ "$try" -eq 1 ] || sleep "$delay"
+              if git push origin HEAD:main; then return 0; fi
+              delay=$((try * 15))
+              # Unguarded, this fetch was itself a way for the step to die under -e in the
+              # middle of deciding what went wrong.
+              if ! git fetch origin main; then
+                echo "::warning::the push failed, and so did the fetch that would say whether main moved; treating it as a transient fault"
+              elif [ "$(git rev-parse origin/main)" != "$before" ]; then
+                return 1
+              else
+                echo "push failed and main did not move (attempt $try of 3)"
+              fi
+            done
+            echo "::error::three pushes over three quarters of a minute failed and main never moved, so this is not a race. Either GitHub refused the push -- a branch rule on main, or contents: write missing from the workflow token -- or it was unwell throughout. The git output above says which. Nothing was pushed; the next scheduled run tries again."
+            return 2
+          }
+
           rebuild_failed=0
           for attempt in 1 2 3; do
             if git diff --quiet -- README.md meta/last-run.json && [ -z "$(git status --porcelain -- meta/last-run.json)" ]; then
@@ -197,22 +241,20 @@ jobs:
             fi
             commit
             before=$(git rev-parse origin/main)
-            if git push origin HEAD:main; then
+            pushed=0
+            push_to_main || pushed=$?
+            if [ "$pushed" -eq 0 ]; then
               if [ "$BUILD_OUTCOME" = "success" ]; then
                 exit 0
               fi
               if [ "$rebuild_failed" = 1 ]; then
                 echo "::error::the rebuild on the new head failed; its run record is committed, README.md is untouched"
               else
-                echo "::error::the build failed; its run record is committed, README.md is untouched"
+                echo "::error::this run did not produce a README; its run record is committed, README.md is untouched"
               fi
               exit 1
             fi
-            git fetch origin main
-            if [ "$(git rev-parse origin/main)" = "$before" ]; then
-              echo "::error::push rejected but main did not move -- a branch rule or a token permission, not a race"
-              exit 1
-            fi
+            [ "$pushed" -eq 1 ] || exit 1   # 2: named above, and no retry will change it
             [ "$attempt" -lt 3 ] || break
             # Someone pushed to main while this ran. Do not rebase a generated file:
             # start again from their commit and let the builder decide what changed.

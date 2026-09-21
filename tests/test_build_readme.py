@@ -1086,6 +1086,33 @@ class Main(Harness):
             self.assertEqual(br.main(self.argv("--meta-file", str(self.root / "elsewhere.json"))), br.EXIT_OK)
         self.assertEqual(json.loads((self.root / "elsewhere.json").read_text())["status"], "ok")
 
+    def test_record_failure_writes_a_record_and_needs_nothing_to_do_it(self):
+        """What the workflow calls when a step before the build failed, so the build never
+        ran. Without it, the one run in a day that went wrong was the only run to leave no
+        record -- and meta/last-run.json is what the weekly audit reads for freshness, and
+        the commit of it is what keeps GitHub from disabling the schedule. It must work with
+        no token, no network and no fixtures: the run it describes is one where something
+        upstream was already broken."""
+        with mock.patch.dict(os.environ, {}, clear=False), \
+             mock.patch.object(br, "_open", side_effect=AssertionError("network was touched")), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            os.environ.pop("GITHUB_TOKEN", None)
+            os.environ.pop("PROFILE_FIXTURES", None)
+            self.assertEqual(br.main(["--root", str(self.root), "--record-failure", "the tests failed"]), br.EXIT_OK)
+        self.assertIn("recorded a failed run", out.getvalue())
+        meta = self.meta()
+        self.assertEqual((meta["status"], meta["exit_code"], meta["error"]), ("error", None, "the tests failed"))
+        self.assertRegex(meta["finished_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertNotIn("sections", meta)      # it never read the README; the audit
+        self.assertNotIn("block_bytes", meta)   # compares these against the page
+        self.assertEqual(self.readme_bytes().decode(), README_TEMPLATE)
+
+    def test_record_failure_with_nowhere_to_write_is_an_error(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(br.main(self.argv("--record-failure", "x", "--no-meta")), br.EXIT_ERROR)
+        self.assertIn("nothing to write", err.getvalue())
+        self.assertFalse((self.root / "meta").exists())
+
     def test_bad_now_is_an_error_with_a_record(self):
         self.uncurated()
         self.repos(repo("first", description="a"))
