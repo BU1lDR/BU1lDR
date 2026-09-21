@@ -11,9 +11,11 @@
 #      tokens -> Generate new token. Repository access: only <owner>/<owner> (the
 #      profile repository). Permissions: Contents = Read and write (the dispatch
 #      endpoint requires it). Nothing else. Expiration: "No expiration" is allowed
-#      for a personal account and is what this token has; an expiring token turns
-#      into a silent fall-back to the profile's own schedule on the day it expires. GitHub
-#      revokes any token unused for a year regardless -- pushes here count as use.
+#      for a personal account, and is worth choosing, because an expiring token turns
+#      into a silent fall-back to the profile's own schedule on the day it expires --
+#      nothing goes red, the profile just gets slower. GitHub revokes any token unused
+#      for a year regardless, and pushes here count as use. Whichever you pick, the
+#      weekly audit in the profile repository reports a dispatch that stopped arriving.
 #   2. Store it in each project repository as a secret named PROFILE_DISPATCH_TOKEN,
 #      or run docs/install-dispatch-secret.sh from the profile repository, which
 #      finds every repository carrying this file and sets the secret in each:

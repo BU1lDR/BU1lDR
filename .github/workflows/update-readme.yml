@@ -39,14 +39,28 @@
 # record itself (--record-failure) rather than committing nothing, which is what it
 # used to do on the one run of the day that a person most needed a record of.
 # The last step pings an external monitor when the HEALTHCHECK_URL secret is set --
-# the one signal that survives this workflow not running at all. To set it up: make
-# a check at healthchecks.io (or cronitor.io) with a period of 1 day and a grace of
-# 1 day, copy its ping URL, then `gh secret set HEALTHCHECK_URL -R <owner>/<owner>`.
-# A day of grace and not an hour: GitHub drops a scheduled tick under load often enough
-# that the weekly audit calls one missing day a warning, so a monitor that paged on it
-# would be muted inside a month and then it is watching nothing. Two silent days is the
-# condition worth being woken for, and it is the one FRESH_LIMIT fails on too.
-# Until then the step prints a notice and does nothing.
+# the one signal that survives this workflow not running at all. To set it up: make a
+# check at healthchecks.io with a period of 1 day and a grace of 36 hours, copy its ping
+# URL, then `gh secret set HEALTHCHECK_URL -R <owner>/<owner>` (at the hidden prompt; not
+# --body, which lands in shell history). Until then the step prints a notice and does
+# nothing.
+#
+# Only a scheduled run moves that heartbeat -- see the step for why -- so the gap the
+# monitor measures is the gap between ticks: at most 24h plus lateness when the schedule
+# is healthy, 48h plus lateness when one tick is dropped, at least 72h minus lateness
+# when two are. With the two to eight hours this account loses, 60h (a day plus 36 hours)
+# is above the one-dropped case and below the two-dropped one. That is deliberate: GitHub
+# drops a tick often enough that the weekly audit only warns about one, so a monitor that
+# paged on it would be muted inside a month and then it is watching nothing. Two silent
+# days is the condition worth being woken for, and it is the one FRESH_LIMIT fails on too.
+# A day of grace would alert at exactly 48h, which one dropped tick reaches on its own.
+#
+# Two things the run log cannot tell you. healthchecks.io answers 200 for a UUID that
+# does not exist, so a mistyped URL prints "Monitor pinged" and then pages you 60 hours
+# later about a check that never received anything: after the first scheduled run, look
+# at the check's page and confirm a ping arrived. And cronitor is not a drop-in
+# alternative despite what this comment used to say -- it reports a failure with a
+# ?state=fail query parameter, so the /fail path this step builds would be silently lost.
 
 name: Update README
 
@@ -303,6 +317,25 @@ jobs:
       - name: Tell the external monitor how this run ended
         # Last step, on purpose: it reports the whole job. A failed ping is a warning,
         # not a red run -- the monitor itself alarms on a missed heartbeat.
+        #
+        # Only a scheduled run moves the heartbeat. That is the whole point of having a
+        # monitor outside GitHub: the thing no check inside GitHub can report is the
+        # scheduler stopping, and this workflow has three other ways in. It ran 42 times
+        # in its first 22 hours -- 25 dispatches, 10 pushes, 4 scheduled ticks, 3 by hand,
+        # a median of eleven minutes apart -- so a heartbeat fed by all of them would be
+        # reset continuously and would stay green through a cron that never fired again.
+        # Pinged on every event, the monitor watches "was this workflow run at all", which
+        # is true every few minutes and is nobody's alarm.
+        #
+        # So the other events report to /log, which healthchecks.io records against the
+        # check without touching its state or its timer, and they are worth recording: the
+        # check's page then shows the dispatches arriving between ticks, which is the
+        # difference between a quiet monitor and a dead one.
+        #
+        # A red or cancelled run pings /fail, which alarms at once instead of waiting out
+        # period plus grace. A later push or dispatch that fixes the build reports to /log
+        # and deliberately does not clear that alarm -- only the next scheduled success
+        # does, within a day. A failure nobody has looked at should not clear itself.
         if: ${{ always() && inputs.dry_run != true }}
         env:
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
@@ -312,10 +345,16 @@ jobs:
             echo "::notice::HEALTHCHECK_URL is not set; no external monitor is pinged. See the header of this workflow."
             exit 0
           fi
-          url="$HEALTHCHECK_URL"
-          if [ "$JOB_STATUS" != "success" ]; then url="${HEALTHCHECK_URL%/}/fail"; fi
+          base=${HEALTHCHECK_URL%/}
+          if [ "$JOB_STATUS" != "success" ]; then
+            url="$base/fail"
+          elif [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            url="$base"
+          else
+            url="$base/log"
+          fi
           if curl -fsS -m 10 --retry 3 -o /dev/null -A "update-readme/$GITHUB_REPOSITORY" "$url"; then
-            echo "Monitor pinged ($JOB_STATUS)."
+            echo "Monitor pinged: $JOB_STATUS on $GITHUB_EVENT_NAME (${url#"$base"} - empty path is the heartbeat)."
           else
             echo "::warning::the monitor ping failed; the monitor will raise a missed-heartbeat alarm on its own"
           fi
