@@ -71,14 +71,15 @@ on:
 permissions:
   contents: write
 
-# One run at a time and one waiting. queue: single (the default) is the right one:
-# every run rebuilds the whole block from the API, so a waiting run that a newer
-# trigger replaces loses nothing -- queue: max would only stack up identical work.
-# The running one is never cancelled, since it may be mid-push. The waiting run
-# checks out main as of when it starts (see `ref` below), so it sees the earlier
-# commit.
+# One live run at a time and one waiting. queue: single (the default) is the right
+# one: every run rebuilds the whole block from the API, so a waiting run that a
+# newer trigger replaces loses nothing -- queue: max would only stack up identical
+# work. The running one is never cancelled, since it may be mid-push. The waiting
+# run checks out main as of when it starts (see `ref` below), so it sees the
+# earlier commit. A dry run never pushes, so it waits in a group of its own where
+# the next hourly tick cannot replace it before a person sees its summary.
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ inputs.dry_run == true && 'dry-run' || 'live' }}
   cancel-in-progress: false
 
 defaults:
@@ -161,6 +162,12 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
+          if [ "$BUILD_OUTCOME" != "success" ]; then
+            # The builder's contract is that a failed run leaves README.md untouched.
+            # Hold it to that here too: only the run record may reach the commit.
+            git checkout -- README.md
+          fi
+
           rebuild() {
             flags=(--summary-file "$RUNNER_TEMP/summary.md" --meta-file meta/last-run.json)
             if [ "$ALLOW_SHRINK" = "true" ]; then flags+=(--allow-shrink); fi
@@ -186,7 +193,11 @@ jobs:
             commit
             before=$(git rev-parse origin/main)
             if git push origin HEAD:main; then
-              exit 0
+              if [ "$BUILD_OUTCOME" = "success" ]; then
+                exit 0
+              fi
+              echo "::error::the rebuild on the new head failed; its run record is committed, README.md is untouched"
+              exit 1
             fi
             git fetch origin main
             if [ "$(git rev-parse origin/main)" = "$before" ]; then
@@ -200,7 +211,12 @@ jobs:
             cp meta/last-run.json "$RUNNER_TEMP/last-run.json"
             git reset --hard origin/main
             if [ "$BUILD_OUTCOME" = "success" ]; then
-              rebuild
+              if ! rebuild; then
+                # The rebuild failed on the new head. Its run record says why; commit
+                # that on the next pass, with README.md as the new head has it.
+                BUILD_OUTCOME=failure
+                git checkout -- README.md
+              fi
             else
               cp "$RUNNER_TEMP/last-run.json" meta/last-run.json   # the failed run's record, on the new head
             fi

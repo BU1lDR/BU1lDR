@@ -461,6 +461,8 @@ class Markers(Harness):
         self.assert_refused("delimit sections")
         self.profile("first", "# first — t\n\n<!-- build: sections=9 digest=000000000000 -->\n")
         self.assert_refused("build stamp")
+        self.profile("first", f"# first — t\n\nquoting the header:\n{br.NOTICE}\n")
+        self.assert_refused("notice line")
         self.repos(repo("first", description="<!-- repo: ghost -->"))
         self.profile("first", "# first — t\n\n{description}\n")
         code, _, readme = self.run_build()
@@ -520,8 +522,12 @@ class HostileInput(Harness):
             "> quote": "&gt; quote",
             "- item": "\\- item",
             "+ item": "\\+ item",
-            "1. item": "\\1. item",
-            "12) item": "\\12) item",
+            "1. item": "1\\. item",
+            "12) item": "12\\) item",
+            "1.": "1\\.",
+            "a\u202eb\u202c c": "ab c",
+            "soft\u00adhyphen zero\u200bwidth \ufeffbom": "softhyphen zerowidth bom",
+            "\U0001F468\u200d\U0001F469\u200d\U0001F467": "\U0001F468\u200d\U0001F469\u200d\U0001F467",
             "= rule": "= rule",
             "---": "\\---",
             "===": "\\===",
@@ -573,6 +579,59 @@ class HostileInput(Harness):
         self.assertEqual(code, 0)
         self.assertIn("\n\n\tindented\tbody\n", readme)
 
+    def test_bidirectional_controls_in_a_profile_are_an_error_but_rtl_text_is_fine(self):
+        self.repos(repo("first"))
+        self.profile("first", "# first — tail\n\nbody \u202e evil\n")
+        self.assert_refused("bidirectional control character U+202E on line 3")
+        self.profile("first", "# first — tail\n\n\u2066isolated\u2069\n")
+        self.assert_refused("bidirectional control character U+2066")
+        self.profile("first", "# first — مرحبا\n\nمرحبا بالعالم\n")
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("— مرحبا\n\nمرحبا بالعالم\n", readme)
+
+    def test_a_body_ending_inside_a_fence_or_html_block_is_refused(self):
+        self.repos(repo("first"))
+        self.profile("first", "# first — t\n\nIntro\n\n```\ncode never closed\n")
+        self.assert_refused("unclosed code fence (```)")
+        self.profile("first", "# first — t\n\n~~~~\nx\n~~~\n")   # a shorter run does not close it
+        self.assert_refused("unclosed code fence (~~~~)")
+        self.profile("first", "# first — t\n\n<pre>\nraw\n")
+        self.assert_refused("unclosed <pre> block")
+        self.profile("first", "# first — t\n\n<SCRIPT src=x>\nalert(1)\n")
+        self.assert_refused("unclosed <script> block")
+        self.profile("first", "# first — t\n\n```py\ncode with ``` inside\n```\n\n<pre>one line</pre>\n\n"
+                              "<details><summary>s</summary>\n\nfine\n\n</details>\n\n~~~\nx\n~~~~\n")
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("```py\ncode with ``` inside\n```\n", readme)
+        self.assertIsNone(br.open_block("```\n```"))
+        self.assertEqual(br.open_block("````\n```"), "code fence (````)")
+        self.assertIsNone(br.open_block("<pre>a</pre>"))
+        self.assertEqual(br.open_block("<textarea>\n"), "<textarea> block")
+
+    def test_placeholders_in_the_display_name_arrive_escaped_and_are_accepted(self):
+        self.repos(repo("first"))
+        self.release("first", release("v1_0|x"))
+        self.profile("first", "# demo {version} — tail {version}\n\nbody\n")
+        code, _, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("### [demo v1\\_0\\|x](https://github.com/someone/first) — tail v1\\_0\\|x\n", readme)
+        self.repos(repo("first", homepage="https://x.example/a]b"))
+        self.profile("first", "# demo {live} — tail\n\nbody\n")
+        self.assert_refused("unescaped bracket after substitution")
+
+    def test_repository_names_with_underscores_render_as_text_not_emphasis(self):
+        self.uncurated()
+        self.repos(repo("__init__", description="d"), repo("_private_", description="p"), repo("plain_name"))
+        self.profile("plain_name", "# {name} — t\n\n{name} at {url}\n")
+        _, _, readme = self.run_build()
+        sections = self.sections(readme)
+        self.assertEqual(sections["__init__"], "### [\\_\\_init\\_\\_](https://github.com/someone/__init__)\n\nd\n")
+        self.assertTrue(sections["_private_"].startswith("### [\\_private\\_](https://github.com/someone/_private_)\n"))
+        self.assertEqual(sections["plain_name"],
+                         "### [plain\\_name](https://github.com/someone/plain_name) — t\n\nplain\\_name at https://github.com/someone/plain_name\n")
+
     def test_oversized_profile_and_oversized_readme_are_refused(self):
         self.repos(repo("first"))
         self.profile("first", b"# first \xe2\x80\x94 t\n\n" + b"x" * (br.MAX_BLURB_BYTES + 1))
@@ -586,7 +645,8 @@ class HostileInput(Harness):
         self.profile("first", "# first — site ([live]({live}))\n\nbody\n")
         self.assert_refused("uses {live}")
         for bad in ("bu1ldr.github.io/x) not a url", "https://x.example/a)b", "https://x.example/a\\b",
-                    'https://x.example/a"b', "javascript:alert(1)", "https://x.example/ space"):
+                    'https://x.example/a"b', "javascript:alert(1)", "https://x.example/ space",
+                    "https://x.example/\x01", "https://x.example/\u202e", "https://x.example/\u200b"):
             self.repos(repo("first", homepage=bad))
             self.assert_refused("uses {live}")
         self.repos(repo("first", homepage=None))
@@ -815,9 +875,37 @@ class Lifecycle(Harness):
         for line in ("deleted: removed", "hidden: removed", "boxed: removed", "noisy: removed",
                      "oldname: removed", "newname: added"):
             self.assertIn(line, out)
-        self.assertIn("oldname appears to have been renamed to 'newname'", out)
+        self.assertIn("oldname is now listed as 'newname' (renamed)", out)
         # Both uncurated with the same pushed_at: by name, "first" before "newname".
         self.assertEqual(list(self.sections(readme)), ["first", "newname"])
+
+    def test_removal_proceeds_on_a_case_only_rename_or_a_transfer(self):
+        self.uncurated()
+        self.repos(repo("Foo", description="f", repo_id=7), repo("moved", description="m", repo_id=8),
+                   repo("keep", description="k"))
+        self.run_build()
+        self.repos(repo("foo", description="f", repo_id=7), repo("keep", description="k"))
+        self.repo_detail(repo("foo", description="f", repo_id=7), under="Foo")            # GitHub looks names up case-insensitively
+        self.repo_detail(repo("moved", description="m", repo_id=8, owner="otherorg"))    # the 301 to the new owner, followed
+        code, out, readme = self.run_build()
+        self.assertEqual(code, 0)
+        self.assertIn("Foo is now listed as 'foo' (renamed)", out)
+        self.assertIn("moved has moved to 'otherorg/moved'", out)
+        self.assertEqual(list(self.sections(readme)), ["foo", "keep"])
+        for line in ("foo: added", "Foo: removed", "moved: removed"):
+            self.assertIn(line, out)
+
+    def test_a_failed_write_leaves_readme_whole_and_no_temp_file(self):
+        self.repos(repo("first"))
+        self.profile("first", "# first — t\n\nbody\n")
+        before = self.readme_bytes()
+        with mock.patch.object(br.os, "replace", side_effect=OSError(28, "No space left on device")):
+            with self.assertRaises(OSError):
+                self.run_build()
+        self.assertEqual(self.readme_bytes(), before)
+        self.assertFalse((self.root / "README.md.tmp").exists())
+        code, _, _ = self.run_build()
+        self.assertEqual(code, 0)
 
     def test_notice_or_stamp_repair_is_reported_as_a_change(self):
         self.repos(repo("first"))
@@ -1201,6 +1289,10 @@ class Helpers(unittest.TestCase):
         tied = [{"tag_name": "a", "published_at": "2026-01-01T00:00:00Z"}, {"tag_name": "b", "published_at": "2026-01-01T00:00:00Z"}]
         self.assertEqual(br.pick_release(tied)["tag_name"], "b")
         self.assertEqual(br.pick_release(tied[::-1])["tag_name"], "b")  # the order listed does not decide
+        by_id = [{"tag_name": "v1.9.0", "published_at": "2026-01-01T00:00:00Z", "id": 10},
+                 {"tag_name": "v1.10.0", "published_at": "2026-01-01T00:00:00Z", "id": 11}]
+        self.assertEqual(br.pick_release(by_id)["tag_name"], "v1.10.0")        # the id decides before the tag
+        self.assertEqual(br.pick_release(by_id[::-1])["tag_name"], "v1.10.0")
         self.assertEqual(br.pick_release([{"tag_name": "undated"},
                                           {"tag_name": "dated", "published_at": "2026-01-01T00:00:00Z"}])["tag_name"], "dated")
 

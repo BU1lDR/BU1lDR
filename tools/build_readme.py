@@ -57,13 +57,17 @@ WHAT EACH REPOSITORY CONTROLS
                               {name} {url}   the repository's name and URL
                               {{version}}    a literal "{version}" (same for the others);
                                              braces beyond that pair are left as written
-                            {version}, {license} and {description} are API text and are
-                            rendered as *plain text*: HTML in them is shown, not
-                            interpreted, Markdown punctuation is escaped, newlines
-                            become spaces, and they cannot open a heading, a list, a
-                            link, a comment or a code span. Do not wrap them in
-                            backticks. {name} is ASCII by GitHub's rules and {url} and
-                            {live} are validated URLs; they are inserted as they are.
+                            {version}, {license}, {description} and {name} are API text
+                            and are rendered as *plain text*: HTML in them is shown,
+                            not interpreted, Markdown punctuation is escaped, newlines
+                            become spaces, invisible format characters are dropped,
+                            and they cannot open a heading, a list, a Markdown link, a
+                            comment or a code span (GitHub still autolinks a bare
+                            https:// or www. host in any text). Do not wrap them in
+                            backticks. {url} and {live} are validated URLs, inserted as
+                            they are. A body may not end inside an open code fence or
+                            an open <pre>, <script>, <style> or <textarea>: on the page
+                            that would swallow every section after it.
     snippets/<name>.md      same format, kept in THIS repository; used only when the
                             repository has no .github/PROFILE.md
     (neither)               "### [<name>](<url>)" with the GitHub description as body,
@@ -120,8 +124,11 @@ and --allow-shrink is how a person says otherwise. A repository that would be
 *removed* is first looked up directly: if it still exists under the same name as a
 public, unarchived, unexcluded repository, the listing missed it and the run fails
 rather than drop the section; a rename, a deletion, an archive or an exclusion is an
-answer and the removal proceeds. The workflow commits only when this exits 0 and the
-file changed.
+answer and the removal proceeds; so is a rename that only changed case, or a transfer
+to another owner (the lookup follows GitHub's redirect and finds the same id already
+listed, or another owner in full_name). README.md and the run record are written to
+a temporary file and renamed into place, so a write that fails part-way leaves the
+old file whole. The workflow commits only when this exits 0 and the file changed.
 
 THE RUN RECORD
 
@@ -144,6 +151,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -171,8 +179,10 @@ TITLE_SEP = " — "
 TITLE_SEP_ASCII = " -- "
 PLACEHOLDER_NAMES = "version|license|live|description|name|url"
 PLACEHOLDER = re.compile(r"\{\{(" + PLACEHOLDER_NAMES + r")\}\}|\{(" + PLACEHOLDER_NAMES + r")\}")
-# A URL that can sit inside "[text](...)" without closing it early or escaping out.
-HTTP_URL = re.compile(r"https?://[^\s()<>\\\"'`]+")
+# A URL that can sit inside "[text](...)" without closing it early or escaping out:
+# no whitespace, brackets, quotes, backslash, control characters. Format characters
+# (bidi controls and the like) are checked separately in valid_url().
+HTTP_URL = re.compile(r"https?://[^\s()<>\\\"'`\x00-\x1f\x7f]+")
 ATX_HEADING = re.compile(r"#{1,6}(?:\s|$)")
 # Each generated section opens with an invisible line naming its repository, so the
 # block can be split back into sections without guessing from headings -- a body is
@@ -273,6 +283,7 @@ def validate_releases(data, where: str) -> list[dict]:
         _field(release, "draft", bool, where)
         _field(release, "prerelease", bool, where)
         _field(release, "published_at", (str, type(None)), where)
+        _field(release, "id", int, where, required=False)
     return releases
 
 
@@ -501,15 +512,17 @@ class Fixtures:
 
 
 def pick_release(data) -> dict | None:
-    """Newest by published_at; a tie goes to the greater tag name, so the answer does
-    not depend on the order the API happened to list them in."""
+    """Newest by published_at. A tie (two releases in the same second) goes to the
+    greater release id -- GitHub assigns them in creation order -- and only then to
+    the greater tag name, so "v1.10.0" is not lost to "v1.9.0" and the answer never
+    depends on the order the API happened to list them in."""
     if data is None:
         return None
     releases = data if isinstance(data, list) else [data]
     published = [r for r in releases if r.get("tag_name") and not r.get("draft") and not r.get("prerelease")]
     if not published:
         return None
-    return max(published, key=lambda r: (r.get("published_at") or "", r.get("tag_name") or ""))
+    return max(published, key=lambda r: (r.get("published_at") or "", r.get("id") or 0, r.get("tag_name") or ""))
 
 
 def _next_link(link_header: str) -> str | None:
@@ -576,11 +589,32 @@ def _invert(stamp: str) -> str:
 _HTML_ESCAPES = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
 _MARKDOWN_SPECIALS = frozenset("\\`*_[]~|")
 # What can open a block at the start of a line, per CommonMark: an ATX heading, a
-# bullet or ordered list marker (each needs a following space or the end of the
-# line), or a thematic break / setext underline made only of "-" or "=". ">" and
-# "<" are handled by the HTML escape; "*", "_", "`", "~" and "[" by the specials.
-_BLOCK_OPENER = re.compile(r"^(?:#{1,6}(?:\s|$)|[-+](?:\s|$)|\d{1,9}[.)](?:\s|$)|[-=]+\s*$)")
+# bullet list marker (each needs a following space or the end of the line), or a
+# thematic break / setext underline made only of "-" or "=". These take a leading
+# backslash. An ordered-list marker ("1. " / "1) ") is escaped at its delimiter
+# instead -- "1\. item" -- because a backslash before a digit is not an escape and
+# would show. ">" and "<" are handled by the HTML escape; "*", "_", "`", "~" and
+# "[" by the specials.
+_BLOCK_OPENER = re.compile(r"^(?:#{1,6}(?:\s|$)|[-+](?:\s|$)|[-=]+\s*$)")
+_ORDERED_OPENER = re.compile(r"^(\d{1,9})([.)])(?=\s|$)")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Bidirectional overrides, embeddings and isolates: the Trojan-Source characters. A
+# blurb that contains one is refused; API text has them removed with the rest of
+# the format characters.
+_BIDI = re.compile("[\u202a-\u202e\u2066-\u2069]")
+
+
+def strip_format_characters(text: str) -> str:
+    """Remove Unicode format characters (category Cf): bidi controls, zero-width
+    spaces, soft hyphens, byte-order marks, word joiners -- invisible, and able to
+    reorder or hide what a line appears to say. U+200D, the zero-width joiner, is
+    kept: emoji sequences are built from it."""
+    return "".join(ch for ch in text if ch == "\u200d" or unicodedata.category(ch) != "Cf")
+
+
+def valid_url(text: str) -> bool:
+    """An http(s) URL that can be a link destination as it is."""
+    return bool(HTTP_URL.fullmatch(text)) and strip_format_characters(text) == text
 
 
 def escape_text(value: str) -> str:
@@ -588,12 +622,16 @@ def escape_text(value: str) -> str:
     Markdown. HTML is shown rather than interpreted, so "<script>" is six visible
     characters and "<!-- work:end -->" cannot close the block. Markdown punctuation
     is backslash-escaped, so "|", "*", "_", "[x](y)" and an unbalanced backtick are
-    literal. Newlines become spaces and control characters go, so a value stays on
-    its one line. A leading "# ", "- ", "+ ", "1. " or a bare "---" is escaped so the
-    value cannot open a heading, a list or a rule. "$&", "$1" and "\\1" are just
-    characters here: substitution is done by a function, never a replacement string.
-    Idempotent on text without any of those characters; not meant to be applied twice."""
-    text = _CONTROL.sub("", value).replace("\r\n", "\n").replace("\r", "\n")
+    literal. Newlines become spaces, and control and format characters (bidi
+    overrides, zero-width spaces) go, so a value stays on its one line and reads the
+    way it is written. A leading "# ", "- ", "+ " or a bare "---" gets a backslash
+    and "1. " becomes "1\\. ", so the value cannot open a heading, a list or a rule.
+    "$&", "$1" and "\\1" are just characters here: substitution is done by a function,
+    never a replacement string. What this does not stop: GitHub autolinks a bare
+    "https://..." or "www." host in plain text whatever the escaping, so a
+    description can still place a plain, visible link. Idempotent on text without
+    any of those characters; not meant to be applied twice."""
+    text = strip_format_characters(_CONTROL.sub("", value)).replace("\r\n", "\n").replace("\r", "\n")
     text = " ".join(part.strip() for part in text.split("\n") if part.strip())
     out = []
     for char in text:
@@ -606,6 +644,8 @@ def escape_text(value: str) -> str:
     text = "".join(out)
     if _BLOCK_OPENER.match(text):
         text = "\\" + text
+    else:
+        text = _ORDERED_OPENER.sub(lambda m: m.group(1) + "\\" + m.group(2), text, count=1)
     return text
 
 
@@ -630,6 +670,11 @@ def normalise_blurb(raw: bytes, where: str) -> str:
         line = text.count("\n", 0, stray.start()) + 1
         raise BuildError(f"{where} contains the control character U+{ord(stray.group()):04X} on line {line}; "
                          "a blurb is text -- tabs and newlines only")
+    bidi = _BIDI.search(text)
+    if bidi:
+        line = text.count("\n", 0, bidi.start()) + 1
+        raise BuildError(f"{where} contains the bidirectional control character U+{ord(bidi.group()):04X} on line "
+                         f"{line}, which can make a line read differently from how it is written; remove it")
     return text
 
 
@@ -660,9 +705,12 @@ def placeholders(repo: dict, release: dict | None) -> dict[str, str]:
     return {
         "version": escape_text(tag) if tag else "unreleased",
         "license": escape_text(licence),
-        "live": homepage if HTTP_URL.fullmatch(homepage) else "",
+        "live": homepage if valid_url(homepage) else "",
         "description": escape_text((repo.get("description") or "").strip()),
-        "name": repo["name"],
+        # ASCII by GitHub's rules, but "_" is legal in a name and "__init__" is
+        # emphasis in Markdown; escaped like the rest. The section mark and the
+        # URL use the raw name.
+        "name": escape_text(repo["name"]),
         "url": repo_url(repo),
     }
 
@@ -696,7 +744,7 @@ def render_section(repo: dict, release: dict | None, blurb: str | None, where: s
     mark = section_mark(name) + "\n"
     if blurb is None:
         body = values["description"] or "No description yet."
-        return mark + f"### [{name}]({url})" + f"\n\n{body}\n"
+        return mark + f"### [{values['name']}]({url})" + f"\n\n{body}\n"
 
     title, body = split_blurb(blurb)
     if title is None:
@@ -708,11 +756,18 @@ def render_section(repo: dict, release: dict | None, blurb: str | None, where: s
             f"({(repo.get('homepage') or '')!r}); set one or drop the placeholder"
         )
 
-    title = substitute(title.replace(TITLE_SEP_ASCII, TITLE_SEP, 1), values)
-    display, _, tail = title.partition(TITLE_SEP)
-    display, tail = display.strip() or name, tail.strip()
-    if any(char in display for char in "[]\\"):
-        raise BuildError(f"{where}: the display name {display!r} contains a bracket or backslash, which breaks the link")
+    # Split before substituting, so a value cannot move the separator, and check the
+    # owner's own text for brackets and backslashes: a substituted value arrives
+    # escaped ("\_", "\]"), which is legal inside link text.
+    display_raw, _, tail_raw = title.replace(TITLE_SEP_ASCII, TITLE_SEP, 1).partition(TITLE_SEP)
+    if any(char in display_raw for char in "[]\\"):
+        raise BuildError(f"{where}: the display name {display_raw.strip()!r} contains a bracket or backslash, "
+                         "which breaks the link")
+    display = substitute(display_raw, values).strip() or values["name"]
+    if re.search(r"(?<!\\)[\[\]]", display):
+        raise BuildError(f"{where}: the display name {display!r} contains an unescaped bracket after substitution "
+                         "(a URL placeholder in the display name?), which breaks the link")
+    tail = substitute(tail_raw, values).strip()
     body = substitute(body, values).strip("\n")
     first_body_line = body.split("\n", 1)[0] if body else ""
     if ATX_HEADING.match(first_body_line):
@@ -722,8 +777,47 @@ def render_section(repo: dict, release: dict | None, blurb: str | None, where: s
     return mark + head + (f"\n\n{body}\n" if body else "\n")
 
 
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_HTML_BLOCK_START = re.compile(r"^ {0,3}<(pre|script|style|textarea)(?=[\s>]|$)", re.IGNORECASE)
+
+
+def open_block(text: str) -> str | None:
+    """The kind of block the text ends inside, or None. Per CommonMark an unclosed
+    code fence, or an unclosed <pre>, <script>, <style> or <textarea>, runs to the
+    end of the document -- which here means through every later section, the end
+    marker and the rest of the README."""
+    fence: tuple[str, int] | None = None
+    html: str | None = None
+    for line in text.split("\n"):
+        if fence is not None:
+            match = _FENCE.match(line)
+            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= fence[1] \
+                    and not line[match.end():].strip():
+                fence = None
+            continue
+        if html is not None:
+            if re.search(rf"</{html}>", line, re.IGNORECASE):
+                html = None
+            continue
+        match = _FENCE.match(line)
+        if match:
+            fence = (match.group(1)[0], len(match.group(1)))
+            continue
+        match = _HTML_BLOCK_START.match(line)
+        if match:
+            html = match.group(1).lower()
+            if re.search(rf"</{html}>", line[match.end():], re.IGNORECASE):
+                html = None
+    if fence is not None:
+        return f"code fence ({fence[0] * fence[1]})"
+    if html is not None:
+        return f"<{html}> block"
+    return None
+
+
 def validate_section(section: str, name: str, where: str, start: str, end: str) -> None:
-    """What a rendered section may not contain if the next run is to read it back."""
+    """What a rendered section may not contain if the next run is to read it back,
+    and what it may not leave open if the sections after it are to render."""
     for marker in (start, end):
         if marker in section:
             raise BuildError(f"{where} contains the README marker {marker!r}; refusing to write it")
@@ -731,6 +825,12 @@ def validate_section(section: str, name: str, where: str, start: str, end: str) 
         raise BuildError(f"{where} contains {SECTION_MARK_PREFIX!r}, which this tool uses to delimit sections")
     if any(BUILD_STAMP.match(line) for line in section.split("\n")):
         raise BuildError(f"{where} contains a build stamp line, which this tool writes itself")
+    if NOTICE in section:
+        raise BuildError(f"{where} contains the generated-block notice line, which this tool writes itself")
+    kind = open_block(section)
+    if kind:
+        raise BuildError(f"{where} ends inside an unclosed {kind}; on the page it would swallow every section "
+                         "after it and the rest of the README. Close it")
 
 
 def render_inner(sections: list[str]) -> str:
@@ -949,6 +1049,7 @@ def build(root: Path, source, check: bool, summary_file: Path | None, out=None, 
                          f"the limit is {MAX_README_BYTES:,} (GitHub truncates at 500 KiB)")
     changes = describe_change(old_inner, inner, login)
 
+    listed_ids = {repo["id"] for repo in listed}
     for line in changes:
         if not line.endswith(": removed"):
             continue
@@ -958,9 +1059,17 @@ def build(root: Path, source, check: bool, summary_file: Path | None, out=None, 
         still = source.get_repo(f"{login}/{gone}")
         if still is None:
             continue  # deleted, or private to this token: an answer
+        hint = " -- update profile.config.json" if gone.lower() in curated else ""
+        if still["id"] in listed_ids:
+            # The lookup followed GitHub's redirect to a repository the listing already
+            # has under its new name -- a rename, including one that only changed case.
+            warn(f"{gone} is now listed as {still['name']!r} (renamed); dropping the old section{hint}")
+            continue
+        if still["full_name"].split("/")[0].lower() != login.lower():
+            warn(f"{gone} has moved to {still['full_name']!r}; dropping its section{hint}")
+            continue
         if still["name"].lower() != gone.lower():
-            warn(f"{gone} appears to have been renamed to {still['name']!r}; dropping the old section"
-                 + (" -- update profile.config.json" if gone.lower() in curated else ""))
+            warn(f"{gone} appears to have been renamed to {still['name']!r}; dropping the old section{hint}")
             continue
         if select([still], config):
             raise BuildError(f"{gone} is still a public repository but was absent from the listing; "
@@ -995,7 +1104,7 @@ def build(root: Path, source, check: bool, summary_file: Path | None, out=None, 
         return EXIT_STALE
     # Summary first: if writing it fails, main()'s "left untouched" is still true.
     _write_summary(summary_file, changes, provenance, warnings)
-    readme_path.write_text(updated, encoding="utf-8", newline="\n")
+    write_atomically(readme_path, updated)
     print("README.md rewritten:", file=out)
     for line in changes:
         print(f"  {line}", file=out)
@@ -1020,12 +1129,31 @@ def _write_summary(path: Path | None, changes: list[str], provenance: list[str],
             handle.write("### README build\n\n```\n" + text + "```\n")
 
 
+def write_atomically(path: Path, text: str) -> None:
+    """Write beside the target, flush to disk, then rename over it. A failure
+    part-way (disk full, I/O error) leaves the old file whole, so "exit 2 and
+    README.md untouched" holds for the write itself and not only for the decision
+    to write."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_meta(path: Path, report: dict) -> None:
     """The run record, sorted keys, LF, trailing newline: two runs with the same
     inputs and the same NOW write the same bytes."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-                    encoding="utf-8", newline="\n")
+    write_atomically(path, json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
 
 
 def _actions_context() -> dict:

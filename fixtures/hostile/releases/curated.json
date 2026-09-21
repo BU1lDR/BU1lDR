@@ -12,12 +12,14 @@
     "prerelease": true
   },
   {
+    "id": 6,
     "tag_name": "v1.0_beta|<1>&2`3$1",
     "published_at": "2026-07-01T00:00:00Z",
     "draft": false,
     "prerelease": false
   },
   {
+    "id": 5,
     "tag_name": "v1.0_alpha",
     "published_at": "2026-07-01T00:00:00Z",
     "draft": false,

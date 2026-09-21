@@ -22,8 +22,13 @@ REPO=${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)
 OWNER=${REPO%%/*}
 WORKFLOW=update-readme.yml
 AUDIT_WORKFLOW=audit.yml
-CRON_SECONDS=3600                     # the schedule in update-readme.yml is hourly
-FRESH_LIMIT=$((2 * CRON_SECONDS + 900))   # two intervals plus a run's worth of slack
+# The schedule in update-readme.yml is hourly, but GitHub runs a public repository's
+# schedule late and unevenly -- gaps of two to five hours between ticks are normal
+# here -- so a two-interval limit would cry wolf most Mondays. Freshness is judged
+# over a day: a day with no successful run is wrong whatever the scheduler does, and
+# the hazard that matters is the 60-day shutdown. A late scheduler is a warning.
+FRESH_LIMIT=$((26 * 3600))
+LATE_SCHEDULE=$((6 * 3600))
 README_LIMIT=$((100 * 1024))
 UA="profile-readme-audit (+https://github.com/$REPO)"
 
@@ -83,7 +88,7 @@ else
     if [ "$age" -le "$FRESH_LIMIT" ]; then
       ok "last recorded run finished ${age}s ago ($finished)"
     else
-      bad "last recorded run finished ${age}s ago ($finished); the limit is ${FRESH_LIMIT}s -- the hourly run is not committing"
+      bad "last recorded run finished ${age}s ago ($finished); the limit is ${FRESH_LIMIT}s -- no run has committed a record in a day"
     fi
   fi
   if [ "$status" = "ok" ]; then
@@ -103,6 +108,19 @@ else
     ok "newest successful run started ${age}s ago ($newest)"
   else
     bad "newest successful run started ${age}s ago ($newest); the limit is ${FRESH_LIMIT}s"
+  fi
+fi
+
+newest_sched=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?event=schedule&per_page=1" \
+                 --jq '.workflow_runs[0].run_started_at // empty' 2>/dev/null) || newest_sched=""
+if [ -z "$newest_sched" ]; then
+  warn "no scheduled run of $WORKFLOW appears in the run history; pushes and dispatches are doing all the work"
+else
+  age=$(( now - $(to_epoch "$newest_sched") ))
+  if [ "$age" -le "$LATE_SCHEDULE" ]; then
+    ok "newest scheduled run started ${age}s ago ($newest_sched)"
+  else
+    warn "newest scheduled run started ${age}s ago ($newest_sched); GitHub's scheduler is running late. Nothing to do unless the day-long limit above fails"
   fi
 fi
 
@@ -162,15 +180,25 @@ if meta_path.exists():
         print(f"warning: the last build shrank the block from {before:,} to {after:,} bytes ({note}); look at the page")
     if marks == 0:
         print("problem: the block has no sections")
-for pattern, label in (
-    (r"\bundefined\b", "undefined"), (r"\bNaN\b", "NaN"), (r"\[object Object\]", "[object Object]"),
-    (r"Maximum retries", "Maximum retries"), (r"Bad credentials", "Bad credentials"),
-    (r"Traceback \(most recent", "a Python traceback"), (r"<class '", "a Python repr"), (r"\bNone\b", "None"),
-    (r"\{(?:version|license|live|description|name|url)\}", "an unfilled placeholder"),
-):
-    if re.search(pattern, text):
-        print(f"problem: README.md contains {label}")
-print("ok: none of undefined/NaN/[object Object]/None/Maximum retries/placeholder text is present")
+# Strings that are never English: a failure anywhere in the file.
+never_english = (
+    (r"\[object Object\]", "[object Object]"), (r"Maximum retries", "Maximum retries"),
+    (r"Bad credentials", "Bad credentials"), (r"Traceback \(most recent", "a Python traceback"),
+    (r"<class '", "a Python repr"),
+)
+hits = [label for pattern, label in never_english if re.search(pattern, text)]
+for label in hits:
+    print(f"problem: README.md contains {label}")
+if not hits:
+    print("ok: none of [object Object] / Maximum retries / Bad credentials / a traceback / a repr is present")
+# Words that are English as often as they are a bug ("Dependencies: None"): a warning,
+# and only inside the block, where API text lands. An unfilled placeholder is not
+# checked for: substitute() is single-pass and the digest above proves the block is
+# exactly what the builder wrote, so a "{version}" there is the documented
+# {{version}} literal, not a miss.
+soft = [word for word in ("None", "undefined", "NaN") if re.search(rf"\b{word}\b", inner)]
+if soft:
+    print(f"warning: the block contains the word(s) {', '.join(soft)}; check on the page that they are prose, not a rendered null")
 PYEOF
 )
 
@@ -271,12 +299,18 @@ fi
 # --------------------------------------------- the dispatch token, seen by its effect
 # The PROFILE_DISPATCH_TOKEN lives in the project repositories, not here, and a
 # fine-grained token's expiry is not queryable by anyone but its owner. What can be
-# seen is its effect: a project repository that carries docs/notify-profile.yml and
-# whose default branch moved after the newest repository_dispatch reached this
-# repository has a hook that is not delivering -- a revoked or expired token, or
-# the secret gone. GitHub also revokes any token unused for a year.
+# seen is its effect, per repository: the hook's own last run (skipped step = the
+# secret is missing there), and whether a repository_dispatch reached this
+# repository within fifteen minutes of it. The hook's step is soft-fail by design,
+# so a dead token still shows a green hook run; the arrival is the truth. GitHub
+# also revokes any token unused for a year.
+shift_iso() {  # ISO instant, minutes -> ISO instant
+  "$PY" -c 'import sys, datetime as d
+t = d.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")) + d.timedelta(minutes=int(sys.argv[2]))
+print(t.strftime("%Y-%m-%dT%H:%M:%SZ"))' "$1" "$2"
+}
 newest_dispatch=$(gh api "repos/$REPO/actions/runs?event=repository_dispatch&per_page=1" \
-                    --jq '.workflow_runs[0].created_at // empty' 2>/dev/null) || newest_dispatch=""
+                    --jq '.workflow_runs[0].created_at // empty' 2>/dev/null | tr -d '\r') || newest_dispatch=""
 dispatch_epoch=0
 [ -n "$newest_dispatch" ] && dispatch_epoch=$(to_epoch "$newest_dispatch")
 hooked=0
@@ -286,16 +320,44 @@ while IFS=$'\t' read -r name branch; do
     continue
   fi
   hooked=$((hooked + 1))
-  tip=$(gh api "repos/$OWNER/$name/commits/$branch" --jq '.commit.committer.date' 2>/dev/null) || tip=""
-  [ -n "$tip" ] || { warn "cannot read the tip of $OWNER/$name@$branch"; continue; }
-  tip_epoch=$(to_epoch "$tip")
-  if [ "$tip_epoch" -gt $((dispatch_epoch + 1800)) ]; then
-    bad "$OWNER/$name carries the notify-profile hook and its $branch moved at $tip, but no repository_dispatch has reached $REPO since ${newest_dispatch:-ever}: the hook is not delivering (PROFILE_DISPATCH_TOKEN revoked, expired, unused for a year, or the secret removed). The hourly schedule still covers content; re-run docs/install-dispatch-secret.sh with a new token."
-  else
-    ok "$OWNER/$name: hook present; last push to $branch ($tip) was followed by a dispatch"
+  last=$(gh api "repos/$OWNER/$name/actions/workflows/notify-profile.yml/runs?branch=$branch&per_page=1" \
+           --jq '.workflow_runs[0] | select(. != null) | [.id, .created_at, .conclusion, .head_sha] | @tsv' 2>/dev/null | tr -d '\r') || last=""
+  if [ -z "$last" ]; then
+    info "$OWNER/$name: hook present; its runs cannot be read from here, or it has not run yet"
+    continue
   fi
-done < <(gh api "users/$OWNER/repos?type=owner&per_page=100" \
-           --jq '.[] | select(.fork == false and .archived == false and .private == false and .name != "'"$OWNER"'") | [.name, .default_branch] | @tsv' 2>/dev/null || true)
+  IFS=$'\t' read -r run_id run_created run_conclusion run_sha <<< "$last"
+  step=$(gh api "repos/$OWNER/$name/actions/runs/$run_id/jobs" \
+           --jq '[.jobs[].steps[] | select(.name | startswith("Tell "))][0].conclusion // "absent"' 2>/dev/null | tr -d '\r') || step="unreadable"
+  case "$step" in
+    success) ;;
+    skipped)
+      # The step skips when the secret is absent. Whether it is absent *now* cannot
+      # be read from here; what can is whether this run predates the newest dispatch
+      # any repository delivered -- if so the secret was probably installed after it.
+      if [ "$(to_epoch "$run_created")" -lt "$dispatch_epoch" ]; then
+        info "$OWNER/$name: its last hook run ($run_created, ${run_sha:0:7}) skipped the dispatch step, but that run predates the newest dispatch from another repository ($newest_dispatch); the next push here will show whether the secret is set"
+      else
+        warn "$OWNER/$name: the hook ran for ${run_sha:0:7} at $run_created but its dispatch step was skipped -- PROFILE_DISPATCH_TOKEN is not set there (run docs/install-dispatch-secret.sh)"
+      fi
+      continue ;;
+    *)
+      warn "$OWNER/$name: the hook's last run ($run_conclusion, $run_created) has dispatch step state '$step'"
+      continue ;;
+  esac
+  from=$(shift_iso "$run_created" -1)
+  to=$(shift_iso "$run_created" 15)
+  arrived=$(gh api "repos/$REPO/actions/runs?event=repository_dispatch&created=${from}..${to}&per_page=5" \
+              --jq '.workflow_runs | length' 2>/dev/null | tr -d '\r') || arrived="unreadable"
+  if [ "$arrived" = "unreadable" ]; then
+    info "$OWNER/$name: hook ran at $run_created; this repository's run history cannot be read from here to confirm arrival"
+  elif [ "$arrived" -gt 0 ]; then
+    ok "$OWNER/$name: hook run at $run_created (${run_sha:0:7}) was followed by a repository_dispatch here"
+  else
+    bad "$OWNER/$name: the hook ran at $run_created (${run_sha:0:7}) and its dispatch step reported success, but no repository_dispatch reached $REPO within fifteen minutes of it. The dispatch is failing -- PROFILE_DISPATCH_TOKEN revoked, expired, unused for a year, or scoped wrong. The hourly schedule still covers content; re-run docs/install-dispatch-secret.sh with a new token."
+  fi
+done < <(gh api "users/$OWNER/repos?type=owner&per_page=100" --paginate \
+           --jq '.[] | select(.fork == false and .archived == false and .private == false and .name != "'"$OWNER"'") | [.name, .default_branch] | @tsv' 2>/dev/null | tr -d '\r' || true)
 [ "$hooked" -gt 0 ] || warn "no project repository carries .github/workflows/notify-profile.yml; the profile updates on the hour only"
 
 # ----------------------------------------------------------------------- verdict

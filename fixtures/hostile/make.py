@@ -37,8 +37,9 @@ HOSTILE = (
     "Title $& $' $` $1 \\1 | un`balanced <script>alert(1)</script> <img src=x onerror=1> "
     '<a href="https://evil.example">x</a> <details><summary>s</summary></details> <picture></picture> '
     "[x](y) *stars* _under_ snake_case_name :shortcode: &amp; "
-    "مرحبا بالعالم "          # RTL
-    "\U0001F468‍\U0001F469‍\U0001F467‍\U0001F466 café\r\n"             # grapheme clusters, CRLF
+    "\u202ereversed\u202c zero\u200bwidth "   # bidi override and a zero-width space: dropped
+    "مرحبا بالعالم "          # RTL text itself is fine
+    "\U0001F468\u200d\U0001F469\u200d\U0001F467\u200d\U0001F466 café\r\n"             # grapheme clusters, CRLF
     f"# not a heading {END} {START} <!-- repo: ghost --> <!-- build: sections=0 digest=000000000000 --> "
     + "x" * 300                                                                                # a 300-character run
 )
@@ -48,6 +49,7 @@ REPOS = [
     repo("fallback", rid=102, description="# Heading\n- item | `tick` <b>x</b> \\1 $1"),
     repo("empty-desc", rid=103, description=None, licence=None),
     repo("Zulu-Upper", rid=104, description="An upper-case name sorts by its lower-case form. ~~strike~~ #1 ---"),
+    repo("__init__", rid=111, description="1. first\n2) second\n3.third -- a name that is emphasis and a description that is a list"),
     repo("secret-project", rid=105, private=True, description="TOP SECRET DESCRIPTION 7f3a"),
     repo("internal-tool", rid=106, private=False, visibility="internal", description="INTERNAL ONLY DESCRIPTION 9c2e"),
     repo("forked-thing", rid=107, fork=True, description="FORK DESCRIPTION 5d1b"),
@@ -59,8 +61,8 @@ REPOS = [
 RELEASES = [
     {"tag_name": "v9.9.9", "published_at": "2026-09-01T00:00:00Z", "draft": True, "prerelease": False},
     {"tag_name": "v2.0.0-rc.1", "published_at": "2026-08-01T00:00:00Z", "draft": False, "prerelease": True},
-    {"tag_name": "v1.0_beta|<1>&2`3$1", "published_at": "2026-07-01T00:00:00Z", "draft": False, "prerelease": False},
-    {"tag_name": "v1.0_alpha", "published_at": "2026-07-01T00:00:00Z", "draft": False, "prerelease": False},  # same date; the greater tag wins
+    {"id": 6, "tag_name": "v1.0_beta|<1>&2`3$1", "published_at": "2026-07-01T00:00:00Z", "draft": False, "prerelease": False},
+    {"id": 5, "tag_name": "v1.0_alpha", "published_at": "2026-07-01T00:00:00Z", "draft": False, "prerelease": False},  # same second; the greater id wins
     {"tag_name": "v0.9.0", "published_at": "2026-06-01T00:00:00Z", "draft": False, "prerelease": False},
 ]
 

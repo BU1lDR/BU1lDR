@@ -7,7 +7,7 @@
     "fork": false,
     "archived": false,
     "private": false,
-    "description": "Title $& $' $` $1 \\1 | un`balanced <script>alert(1)</script> <img src=x onerror=1> <a href=\"https://evil.example\">x</a> <details><summary>s</summary></details> <picture></picture> [x](y) *stars* _under_ snake_case_name :shortcode: &amp; مرحبا بالعالم 👨‍👩‍👧‍👦 café\r\n# not a heading <!-- work:end --> <!-- work:start --> <!-- repo: ghost --> <!-- build: sections=0 digest=000000000000 --> xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "description": "Title $& $' $` $1 \\1 | un`balanced <script>alert(1)</script> <img src=x onerror=1> <a href=\"https://evil.example\">x</a> <details><summary>s</summary></details> <picture></picture> [x](y) *stars* _under_ snake_case_name :shortcode: &amp; ‮reversed‬ zero​width مرحبا بالعالم 👨‍👩‍👧‍👦 café\r\n# not a heading <!-- work:end --> <!-- work:start --> <!-- repo: ghost --> <!-- build: sections=0 digest=000000000000 --> xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     "homepage": "https://example.com/live?a=1&b=2",
     "pushed_at": "2026-06-01T00:00:00Z",
     "license": {
@@ -54,6 +54,22 @@
     "archived": false,
     "private": false,
     "description": "An upper-case name sorts by its lower-case form. ~~strike~~ #1 ---",
+    "homepage": null,
+    "pushed_at": "2026-05-01T00:00:00Z",
+    "license": {
+      "spdx_id": "MIT"
+    },
+    "visibility": "public"
+  },
+  {
+    "id": 111,
+    "name": "__init__",
+    "full_name": "hostile-owner/__init__",
+    "html_url": "https://github.com/hostile-owner/__init__",
+    "fork": false,
+    "archived": false,
+    "private": false,
+    "description": "1. first\n2) second\n3.third -- a name that is emphasis and a description that is a list",
     "homepage": null,
     "pushed_at": "2026-05-01T00:00:00Z",
     "license": {
