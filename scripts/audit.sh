@@ -234,7 +234,7 @@ else
   check_out=$(GITHUB_TOKEN="$check_token" "$PY" tools/build_readme.py --check --no-meta 2>&1)
   case $? in
     0) ok "the block still matches the repositories it describes (build_readme.py --check)" ;;
-    1) bad "the block is out of date against the live repositories -- the hourly run is green but not propagating:"$'\n'"$(printf '%s\n' "$check_out" | sed 's/^/      /')" ;;
+    1) bad "the block is out of date against the live repositories:"$'\n'"$(printf '%s\n' "$check_out" | sed 's/^/      /')"$'\n'"      If one of those repositories changed in the last hour or two, the next scheduled run carries it over and a re-run of this audit passes. If it does not, the hourly run is green and not propagating, which no other check here would notice." ;;
     *) warn "build_readme.py --check could not answer (exit 2); the hourly run is the authority on build health and is checked above:"$'\n'"$(printf '%s\n' "$check_out" | tail -3 | sed 's/^/      /')" ;;
   esac
 fi
