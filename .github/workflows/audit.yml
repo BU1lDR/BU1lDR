@@ -38,7 +38,7 @@ jobs:
       - name: Run the audit
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/audit.sh
+        run: bash scripts/audit.sh   # through bash: a checkout from Windows may not carry the executable bit
 
   report:
     name: open or update the failure issue

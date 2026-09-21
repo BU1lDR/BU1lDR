@@ -45,7 +45,7 @@ jobs:
         run: python3 -m unittest discover -s tests -t . -v 2>&1 | tail -n 5
 
       - name: Acceptance checks (a, b, d, e, f, g, i)
-        run: scripts/acceptance.sh --offline
+        run: bash scripts/acceptance.sh --offline   # through bash: a checkout from Windows may not carry the executable bit
 
       - name: The builder reproduces the committed README from the fixture snapshot
         # Informational: fixtures/api is a snapshot of the live account. When the
