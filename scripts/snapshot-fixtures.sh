@@ -31,7 +31,7 @@ trap 'rm -rf "$STAGE"' EXIT
 
 gh api "users/$LOGIN/repos?type=owner&per_page=100&sort=full_name" --paginate --slurp \
   | "$PY" -c 'import json,sys; pages=json.load(sys.stdin); repos=[r for page in pages for r in page]; print(json.dumps(repos, indent=2, ensure_ascii=False))' \
-  > "$STAGE/repos.json"
+  | tr -d '\r' > "$STAGE/repos.json"   # a Windows Python writes CRLF; JSON never holds a raw CR, so this is safe
 gh api "users/$LOGIN" --jq '{login, id, public_repos, type}' > "$STAGE/user.json"
 
 count=0
