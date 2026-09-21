@@ -336,6 +336,13 @@ jobs:
         # period plus grace. A later push or dispatch that fixes the build reports to /log
         # and deliberately does not clear that alarm -- only the next scheduled success
         # does, within a day. A failure nobody has looked at should not clear itself.
+        #
+        # Which sounds alarming given the concurrency group below, because a burst of
+        # dispatches does leave cancelled runs behind -- two of twelve on the afternoon
+        # this was written. Those cancel while still queued, so no job ever starts and this
+        # step is never reached; the API returns an empty jobs list for them. A cancelled
+        # run that gets this far was cancelled by a person or killed by timeout-minutes,
+        # and both are worth an alarm.
         if: ${{ always() && inputs.dry_run != true }}
         env:
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
