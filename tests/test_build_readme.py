@@ -618,8 +618,9 @@ class HostileInput(Harness):
         self.assertEqual(br.open_block("````\n```"), "code fence (````)")
         self.assertIsNone(br.open_block("<pre>a</pre>"))
         self.assertEqual(br.open_block("<textarea>\n"), "<pre>/<script>/<style>/<textarea> block")
-        self.assertIsNone(br.open_block("~~~foo~~~ tildes may carry backticks\n"))  # a tilde fence's info string may
-        self.assertEqual(br.open_block("~~~foo~~~\n"), "code fence (~~~)")           # ...but this one is then unclosed
+        self.assertIsNone(br.open_block("~~~foo```bar\nx\n~~~\n"))            # a tilde fence's info string may carry backticks
+        self.assertEqual(br.open_block("~~~foo~~~ still an opener\n"), "code fence (~~~)")  # ...and tildes; this one is unclosed
+        self.assertIsNone(br.open_block("```foo```bar\n"))                       # a backtick fence's may not: a code span
 
     def test_placeholders_in_the_display_name_arrive_escaped_and_are_accepted(self):
         self.repos(repo("first"))
