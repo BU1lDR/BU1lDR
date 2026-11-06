@@ -1,10 +1,10 @@
 {
   "actions": {
-    "event": "push",
+    "event": "repository_dispatch",
     "repository": "BU1lDR/BU1lDR",
     "run_attempt": "1",
-    "run_id": "42245886849",
-    "sha": "7710101c86b2660f774ca3bf89eb81aafda1018f"
+    "run_id": "42251366099",
+    "sha": "5c23be6d18526bcf17ca9558c0f217b1c7f30732"
   },
   "block_bytes": 4795,
   "block_bytes_before": 4795,
@@ -12,7 +12,7 @@
   "changes": [],
   "error": null,
   "exit_code": 0,
-  "finished_at": "2026-11-06T15:44:51Z",
+  "finished_at": "2026-11-06T16:20:02Z",
   "provenance": [
     "security-scanner: .github/PROFILE.md, release v1.3.1",
     "file-integrity-checker: .github/PROFILE.md",
@@ -34,10 +34,10 @@
     "kind": "github",
     "rate_limit": {
       "limit": "5000",
-      "remaining": "4946",
-      "reset": "1793980792",
+      "remaining": "4982",
+      "reset": "1793985602",
       "resource": "core",
-      "used": "54"
+      "used": "18"
     },
     "requests": 18
   },
