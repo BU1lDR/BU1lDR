@@ -1,6 +1,6 @@
 {
   "login": "BU1lDR",
-  "exclude": [],
+  "exclude": [".github"],
   "order": [
     "security-scanner",
     "file-integrity-checker",
